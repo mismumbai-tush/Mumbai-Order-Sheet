@@ -1,0 +1,4711 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { GroupedOrder, ProductOrderRow, OrderItem } from '../types/fms';
+import { initialRawResponses, initialExistingDispatch, fmsColumnMapping, productOrderColumns } from '../data/sampleOrders';
+import { ProductOrderView } from './ProductOrderView';
+import { saveOrdersToStorage, loadOrdersFromStorage, clearOrdersFromStorage, purgeAllLegacyStorageAndCaches, hasDelhiDummyData } from '../utils/orderStorage';
+import staticQueryOrders from '../data/ordersQueryData.json';
+import {
+  AUTOMATION_SPREADSHEET_ID,
+  AUTOMATION_TAB_NAME,
+  QUERY_SPREADSHEET_ID,
+  SOURCE_TAB_NAME as QUERY_SOURCE_TAB_NAME,
+  fetchLiveGoogleQueryData
+} from '../utils/googleQueryFetcher';
+import {
+  RotateCcw,
+  PlusCircle,
+  Play,
+  ArrowRight,
+  Info,
+  CheckCircle2,
+  AlertCircle,
+  HelpCircle,
+  Sparkles,
+  Layers,
+  SplitSquareVertical,
+  Edit3,
+  AlertTriangle,
+  FileCode2,
+  ExternalLink,
+  MessageSquare,
+  Copy,
+  Check,
+  X,
+  Download,
+  Filter,
+  Search,
+  Plus,
+  Trash2,
+  Table,
+  Archive,
+  FileSpreadsheet,
+  Zap,
+  CheckSquare,
+  Clock,
+  ArrowUpDown,
+  Eye,
+  EyeOff,
+  Columns,
+  CloudUpload,
+  Database,
+  Flame,
+  ArrowUp,
+  ArrowDown,
+  ChevronDown,
+  Upload,
+  Lock,
+  Pin,
+  FileText,
+  Github,
+  Maximize2,
+  Minimize2,
+  Loader2,
+  Link2,
+  ChevronLeft,
+  ChevronRight
+} from 'lucide-react';
+
+const LOCAL_STORAGE_KEY = 'ginza_fms_query_orders_v16_locked';
+const LOCAL_STORAGE_DISPATCH_KEY = 'ginza_fms_sheet_dispatch_v16';
+const LOCAL_STORAGE_COL_VISIBILITY = 'ginza_fms_col_visibility_v11';
+const LOCAL_STORAGE_FIREBASE_CONFIG = 'ginza_fms_firebase_cfg_v9';
+const LOCAL_STORAGE_FREEZE_CONFIG = 'ginza_fms_freeze_cfg_v9';
+const LOCAL_STORAGE_CONFIRM_KEY = 'ginza_fms_confirm_msg_v9';
+const LOCAL_STORAGE_DISPATCH_WA_KEY = 'ginza_fms_dispatch_wa_v11';
+const LOCAL_STORAGE_COL_W_KEY = 'ginza_fms_col_w_v11';
+const LOCAL_STORAGE_COL_X_KEY = 'ginza_fms_col_x_v11';
+const LOCAL_STORAGE_COL_AE_KEY = 'ginza_fms_col_ae_v11';
+const LOCAL_STORAGE_COL_AF_KEY = 'ginza_fms_col_af_v11';
+const LOCAL_STORAGE_COL_AG_KEY = 'ginza_fms_col_ag_v11';
+const LOCAL_STORAGE_COL_AH_KEY = 'ginza_fms_col_ah_v11';
+const LOCAL_STORAGE_COL_AI_KEY = 'ginza_fms_col_ai_v11';
+const LOCAL_STORAGE_COL_AJ_KEY = 'ginza_fms_col_aj_v11';
+const LOCAL_STORAGE_COL_AL_KEY = 'ginza_fms_col_al_v11';
+
+// Helper: Check if an item/order is Completed (Closed) in Col AM
+export const isItemComplete = (status?: string): boolean => {
+  if (!status) return false;
+  const s = status.toLowerCase().trim();
+  return s === 'closed' || s === 'complete' || s === 'completed' || s === 'done';
+};
+
+interface SpreadsheetSimulatorProps {
+  isFullWidth?: boolean;
+  setIsFullWidth?: (val: boolean) => void;
+  onOpenQueryStudio?: () => void;
+}
+
+export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
+  isFullWidth = true,
+  setIsFullWidth,
+  onOpenQueryStudio
+}) => {
+  const [isFetchingQueryLive, setIsFetchingQueryLive] = useState(false);
+
+  // Load saved orders from localStorage or fallback to Google Sheet Query orders
+  const [rawResponses, setRawResponses] = useState<ProductOrderRow[]>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0 && !hasDelhiDummyData(parsed)) {
+          return parsed;
+        }
+      }
+    } catch (e) {
+      console.error('Failed to parse saved orders', e);
+    }
+    return (staticQueryOrders as any[])?.length > 0
+      ? (staticQueryOrders as any)
+      : initialRawResponses;
+  });
+
+  // Load larger datasets from IndexedDB on initial mount & proactively purge legacy Delhi cache
+  useEffect(() => {
+    purgeAllLegacyStorageAndCaches();
+
+    loadOrdersFromStorage().then((saved) => {
+      if (saved && Array.isArray(saved) && saved.length > 0 && !hasDelhiDummyData(saved)) {
+        setRawResponses(saved);
+      } else if ((staticQueryOrders as any[])?.length > 0) {
+        setRawResponses(staticQueryOrders as any);
+        saveOrdersToStorage(staticQueryOrders as any);
+      }
+    });
+  }, []);
+
+  // Purge legacy Delhi dummy data, lock Google Sheet query data
+  const handlePurgeDelhiAndLockQuery = async () => {
+    setIsFetchingQueryLive(true);
+    setSyncFeedback('🧹 Purging old cache & locking real Google Sheet Mumbai orders...');
+    try {
+      await clearOrdersFromStorage();
+      await purgeAllLegacyStorageAndCaches();
+      const fresh = (staticQueryOrders as any[])?.length > 0 ? (staticQueryOrders as any) : initialRawResponses;
+      setRawResponses(fresh);
+      await saveOrdersToStorage(fresh);
+      setSyncFeedback('🔒 Successfully locked to genuine Mumbai Google Sheet orders! (Delhi cache purged)');
+    } catch (e: any) {
+      console.error(e);
+      setSyncFeedback('Reset complete.');
+    } finally {
+      setIsFetchingQueryLive(false);
+      setTimeout(() => setSyncFeedback(null), 4000);
+    }
+  };
+
+  // Sync Live Data from user Google Sheet (Supports Product Automation 43-cols or Product Order)
+  const handleSyncGoogleQueryLive = async (targetTab?: string) => {
+    setIsFetchingQueryLive(true);
+    const chosenTab = targetTab || (activeSheetTab === 'product_order' ? 'Product Order' : AUTOMATION_TAB_NAME);
+    setSyncFeedback(`⚡ Fetching Google Sheet "${chosenTab}" (Cols A to AQ with Col U & Col AN)...`);
+    try {
+      const res = await fetchLiveGoogleQueryData(AUTOMATION_SPREADSHEET_ID, chosenTab);
+      if (res.rows && res.rows.length > 0) {
+        setRawResponses(res.rows);
+        await saveOrdersToStorage(res.rows);
+        const hasDispatch = res.rows.some(r => (r.dispatchQty || 0) > 0);
+        const hasComplete = res.rows.some(r => isItemComplete(r.statusAN));
+        setSyncFeedback(
+          `✓ Loaded ${res.rows.length.toLocaleString()} rows from "${res.sheetTab}"! ` +
+          `Col U (Dispatch Qnt: ${hasDispatch ? 'Present' : '0'}) & Col AN (Complete: ${hasComplete ? 'Active' : 'Open'}) synced.`
+        );
+      }
+    } catch (err: any) {
+      console.error('Failed to sync live query:', err);
+      setSyncFeedback(`Query sync warning: ${err.message || 'Check network connection'}`);
+    } finally {
+      setIsFetchingQueryLive(false);
+      setTimeout(() => setSyncFeedback(null), 5000);
+    }
+  };
+
+  // State for user-entered dispatch quantities in Col Y
+  const [dispatchRecords, setDispatchRecords] = useState<Record<string, number>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_DISPATCH_KEY);
+      if (saved) {
+        return JSON.parse(saved);
+      }
+    } catch (e) {
+      console.error('Failed to parse saved dispatch', e);
+    }
+    return initialExistingDispatch;
+  });
+
+  // Column Visibility state (Allows hiding/showing manual columns like Addresses, Follow-ups, etc.)
+  const [visibleCols, setVisibleCols] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_VISIBILITY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        return {
+          ...parsed,
+          AA: parsed.AA ?? true,
+          AB: parsed.AB ?? true,
+          AG: parsed.AG ?? true,
+          AH: parsed.AH ?? true,
+          AI: parsed.AI ?? true,
+          AJ: parsed.AJ ?? true,
+          AK: parsed.AK ?? true,
+          AL: parsed.AL ?? true,
+        };
+      }
+    } catch (e) {}
+    // Default: Show all 43 active columns A to AQ from Google Sheet
+    const initial: Record<string, boolean> = {};
+    fmsColumnMapping.forEach(col => {
+      initial[col.sheetCol] = true;
+    });
+    return initial;
+  });
+
+  // Freeze Configuration: freezeColumns (0, 1: #, 2: # + PO, 3: # + PO + Name), freezeRows (1: Header, 0: None)
+  const [freezeColumns, setFreezeColumns] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_FREEZE_CONFIG);
+      if (saved) return JSON.parse(saved).cols ?? 2;
+    } catch (e) {}
+    return 2; // Default: Freeze # and Customer PO for easy scrolling
+  });
+
+  const [freezeRows, setFreezeRows] = useState<number>(1);
+  const [showFreezeMenu, setShowFreezeMenu] = useState(false);
+
+  // Column Dropdown Filter State: Record<colLetter, string[]>
+  const [colFilters, setColFilters] = useState<Record<string, string[]>>({});
+
+  // Active Sorting: { column: string; direction: 'asc' | 'desc' }
+  const [sortConfig, setSortConfig] = useState<{ column: string; direction: 'asc' | 'desc' } | null>(null);
+
+  // Active popover filter menu
+  const [activeFilterCol, setActiveFilterCol] = useState<string | null>(null);
+
+  // Column Visibility Manager modal
+  const [showColManager, setShowColManager] = useState(false);
+  const [selectedColsToHide, setSelectedColsToHide] = useState<string[]>([]);
+
+  // Excel / CSV / Google Sheet Import Modal
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [importTabMode, setImportTabMode] = useState<'sheet' | 'paste' | 'file'>('sheet');
+  const [importSheetId, setImportSheetId] = useState('1xSSZ6DyQarQJOd8UpOfCV-tjdKL1oQq_IKuXJkcRv5Q');
+  const [importTabName, setImportTabName] = useState('Product Order');
+  const [autoSyncToFirebase, setAutoSyncToFirebase] = useState(true);
+  const [importReplaceMode, setImportReplaceMode] = useState(true);
+  const [isFetchingSheet, setIsFetchingSheet] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [pastedDataText, setPastedDataText] = useState('');
+
+  // Vercel / GitHub Deployment Modal
+  const [showVercelGuide, setShowVercelGuide] = useState(false);
+
+  // Firebase Live Sync & Historical Upload Modal
+  const [showFirebaseModal, setShowFirebaseModal] = useState(false);
+  const [firebaseUrl, setFirebaseUrl] = useState(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_FIREBASE_CONFIG);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.url) return parsed.url;
+      }
+    } catch (e) {}
+    return 'https://project-vishal-team-default-rtdb.firebaseio.com';
+  });
+  const [firebaseSecret, setFirebaseSecret] = useState(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_FIREBASE_CONFIG);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (parsed.secret !== undefined) return parsed.secret;
+      }
+    } catch (e) {}
+    return 'iIElINFgR124ssaG3QWjExz2lT72cRh5g502oP6J';
+  });
+  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+
+  // Col AC: Confirmation Msg Status / WhatsApp Sent ("Message Sent" vs "Pending")
+  const [acStatuses, setAcStatuses] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_CONFIRM_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  // Compatibility alias
+  const aeStatuses = acStatuses;
+  const setAeStatuses = setAcStatuses;
+
+  // Col AN: Delivered Whatspp Msg / WhatsApp Sent ("Message Sent" vs "Pending")
+  const [anStatuses, setAnStatuses] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_DISPATCH_WA_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  // Compatibility alias
+  const aoStatuses = anStatuses;
+  const setAoStatuses = setAnStatuses;
+
+  // Col AL: LR- Number state
+  const [lrNumbers, setLrNumbers] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AL_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+
+  // Col W: Status (Manual User Text Edit with Auto-Save)
+  const [colWStatuses, setColWStatuses] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_W_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const colAAStatuses = colWStatuses;
+
+  // Col X: Remark (Manual User Text Edit with Auto-Save)
+  const [colXRemarks, setColXRemarks] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_X_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const colABRemarks = colXRemarks;
+
+  // Col AE: Follow-up 1 Checkbox (true/false)
+  const [colAEChecks, setColAEChecks] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AE_KEY) || localStorage.getItem('ginza_fms_col_ag_v10');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const colAGChecks = colAEChecks;
+
+  // Col AF: Follow-up 1 Timestamp (Auto populated when Col AE checked)
+  const [colAFTimestamps, setColAFTimestamps] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AF_KEY) || localStorage.getItem('ginza_fms_col_ah_v10');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const colAHTimestamps = colAFTimestamps;
+
+  // Col AG: Follow-up 1 Remark (Manual User Text Edit with Auto-Save) - Editable!
+  const [colAGRemarks, setColAGRemarks] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AG_KEY) || localStorage.getItem('ginza_fms_col_ai_v10');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const colAIRemarks = colAGRemarks;
+
+  // Col AH: Follow-up 2 Checkbox (true/false)
+  const [colAHChecks, setColAHChecks] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AH_KEY) || localStorage.getItem('ginza_fms_col_aj_v10');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const colAJChecks = colAHChecks;
+
+  // Col AI: Follow-up 2 Timestamp (Auto populated when Col AH checked)
+  const [colAITimestamps, setColAITimestamps] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AI_KEY) || localStorage.getItem('ginza_fms_col_ak_v10');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const colAKTimestamps = colAITimestamps;
+
+  // Col AJ: Follow-up 2 Remark (Manual User Text Edit with Auto-Save) - Editable!
+  const [colAJRemarks, setColAJRemarks] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AJ_KEY) || localStorage.getItem('ginza_fms_col_al_v10');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const colALRemarks = colAJRemarks;
+
+  // Active Sheet tab: 'product_order' (28-Col Raw Flat Sheet), 'automation' (Product Automation: Active Orders), 'closed' (Closed Orders Archive)
+  const [activeSheetTab, setActiveSheetTab] = useState<'product_order' | 'automation' | 'closed'>('product_order');
+
+  // Status Filter in Toolbar
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'Open' | 'In-Progress' | 'Closed' | 'Complete'>('ALL');
+
+  // View mode: 'merged' (Customer A-E & N-X Vertically Merged) vs 'unmerged' (Flat row-wise)
+  const [viewMode, setViewMode] = useState<'merged' | 'unmerged'>('merged');
+
+  // Global search filter
+  const [searchTerm, setSearchTerm] = useState('');
+
+  // Status message for simulation feedback
+  const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+
+  // Modal for previewing WhatsApp dispatch link (Col AO -> AP)
+  const [whatsAppModalOrder, setWhatsAppModalOrder] = useState<GroupedOrder | null>(null);
+  const [copiedWhatsAppMsg, setCopiedWhatsAppMsg] = useState(false);
+
+  // Modal for previewing Instant Confirmation WhatsApp (Col AE -> AF)
+  const [confirmWhatsAppModalOrder, setConfirmWhatsAppModalOrder] = useState<GroupedOrder | null>(null);
+  const [copiedConfirmMsg, setCopiedConfirmMsg] = useState(false);
+
+  // Modal for New Order entry
+  const [showNewOrderModal, setShowNewOrderModal] = useState(false);
+
+  // Modal for adding item to existing order
+  const [addingItemToOrder, setAddingItemToOrder] = useState<GroupedOrder | null>(null);
+
+  // Quick edit modal for Order No (Col X)
+  const [editingOrderNo, setEditingOrderNo] = useState<{ key: string; po: string; value: string } | null>(null);
+
+  // Debounced safe saving to IndexedDB (supports 10,000+ items without 3,000 cap)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      // 1. Save entire array to IndexedDB (no 3,000 cap, supports 10,000+ rows)
+      saveOrdersToStorage(rawResponses);
+      // 2. Safe fallback to localStorage for smaller datasets
+      try {
+        if (rawResponses.length <= 1500) {
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(rawResponses));
+        }
+      } catch (e) {
+        // LocalStorage quota reached, safely handled by IndexedDB above
+      }
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [rawResponses]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(LOCAL_STORAGE_DISPATCH_KEY, JSON.stringify(dispatchRecords));
+      } catch (e) {}
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [dispatchRecords]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_COL_VISIBILITY, JSON.stringify(visibleCols));
+    } catch (e) {}
+  }, [visibleCols]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LOCAL_STORAGE_FREEZE_CONFIG, JSON.stringify({ cols: freezeColumns, rows: freezeRows }));
+    } catch (e) {}
+  }, [freezeColumns, freezeRows]);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(LOCAL_STORAGE_CONFIRM_KEY, JSON.stringify(acStatuses));
+        localStorage.setItem(LOCAL_STORAGE_DISPATCH_WA_KEY, JSON.stringify(anStatuses));
+        localStorage.setItem(LOCAL_STORAGE_COL_W_KEY, JSON.stringify(colWStatuses));
+        localStorage.setItem(LOCAL_STORAGE_COL_X_KEY, JSON.stringify(colXRemarks));
+        localStorage.setItem(LOCAL_STORAGE_COL_AE_KEY, JSON.stringify(colAEChecks));
+        localStorage.setItem(LOCAL_STORAGE_COL_AF_KEY, JSON.stringify(colAFTimestamps));
+        localStorage.setItem(LOCAL_STORAGE_COL_AG_KEY, JSON.stringify(colAGRemarks));
+        localStorage.setItem(LOCAL_STORAGE_COL_AH_KEY, JSON.stringify(colAHChecks));
+        localStorage.setItem(LOCAL_STORAGE_COL_AI_KEY, JSON.stringify(colAITimestamps));
+        localStorage.setItem(LOCAL_STORAGE_COL_AJ_KEY, JSON.stringify(colAJRemarks));
+        localStorage.setItem(LOCAL_STORAGE_COL_AL_KEY, JSON.stringify(lrNumbers));
+      } catch (e) {}
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [
+    acStatuses,
+    anStatuses,
+    colWStatuses,
+    colXRemarks,
+    colAEChecks,
+    colAFTimestamps,
+    colAGRemarks,
+    colAHChecks,
+    colAITimestamps,
+    colAJRemarks,
+    lrNumbers
+  ]);
+
+  // Group raw responses into distinct orders
+  const groupedOrders: GroupedOrder[] = useMemo(() => {
+    const map: Record<string, GroupedOrder> = {};
+
+    rawResponses.forEach((row) => {
+      const orderKey = [
+        row.customerPO,
+        row.customerName,
+        row.customerEmail,
+        row.customerNumber,
+        row.orderDate
+      ].map(v => (v || '').trim()).join('_');
+
+      if (!map[orderKey]) {
+        map[orderKey] = {
+          orderKey,
+          referenceNo: row.referenceNo || '',
+          timestamp: row.timestamp,
+          customerPO: row.customerPO,
+          customerName: row.customerName,
+          customerEmail: row.customerEmail,
+          orderDate: row.orderDate,
+          items: [],
+          remark: row.remark || '',
+          customerNumber: row.customerNumber,
+          billingAddress: row.billingAddress,
+          deliveryAddress: row.deliveryAddress,
+          transporterName: row.transporterName,
+          salesPerson: row.salesPerson,
+          accountStatus: row.accountStatus,
+          branch: row.branch,
+          approvalStatus: row.approvalStatus,
+          branchHeadName: row.branchHeadName || 'Vinay Chhajer',
+          branchHeadEmail: row.branchHeadEmail || 'vinay.chhajer@ginzalimited.com',
+          orderNo: row.orderNo || '',
+          orderNoTimestamp: row.orderNoTimestamp || '',
+          statusAN: (row.statusAN as any) || 'Open'
+        };
+      } else {
+        if (!map[orderKey].orderNo && row.orderNo) {
+          map[orderKey].orderNo = row.orderNo;
+          map[orderKey].orderNoTimestamp = row.orderNoTimestamp;
+        }
+      }
+
+      const itemKey = `${orderKey}___${row.itemName.trim()}___${row.color.trim()}___${row.width.trim()}`;
+      const dispatch = dispatchRecords[itemKey] !== undefined ? dispatchRecords[itemKey] : (Number(row.dispatchQty) || 0);
+      const balance = Number((row.qty - dispatch).toFixed(4));
+
+      map[orderKey].items.push({
+        id: row.orderId,
+        unit: row.unit,
+        itemName: row.itemName,
+        color: row.color,
+        width: row.width,
+        unitOfItem: row.unitOfItem,
+        qty: row.qty,
+        rate: row.rate,
+        discount: row.discount,
+        deliveryDate: row.deliveryDate,
+        dispatchQty: dispatch,
+        balanceQty: balance,
+        statusAN: (isItemComplete(row.statusAN) ? 'Complete' : (row.statusAN as any)) || 'Open'
+      });
+    });
+
+    return Object.values(map);
+  }, [rawResponses, dispatchRecords]);
+
+  // Handle Status AM Dropdown Change: 'Open' | 'In-Progress' | 'Complete'
+  const handleItemStatusChange = (orderId: string, newStatus: 'Open' | 'In-Progress' | 'Closed' | 'Complete') => {
+    const canonicalStatus = isItemComplete(newStatus) ? 'Complete' : newStatus;
+    let targetOrderKey = '';
+    let affectedClient = '';
+
+    for (const r of rawResponses) {
+      if (r.orderId === orderId) {
+        affectedClient = r.customerName || r.itemName;
+        targetOrderKey = [
+          r.customerPO,
+          r.customerName,
+          r.customerEmail,
+          r.customerNumber,
+          r.orderDate
+        ].map(v => (v || '').trim()).join('_');
+        break;
+      }
+    }
+
+    setRawResponses(prev =>
+      prev.map(row => {
+        const rowOrderKey = [
+          row.customerPO,
+          row.customerName,
+          row.customerEmail,
+          row.customerNumber,
+          row.orderDate
+        ].map(v => (v || '').trim()).join('_');
+
+        // Full record/order lifecycle sync: "complete means full records closed"
+        if (canonicalStatus === 'Complete' && rowOrderKey === targetOrderKey) {
+          return { ...row, statusAN: 'Complete' };
+        }
+        if (row.orderId === orderId) {
+          return { ...row, statusAN: canonicalStatus };
+        }
+        return row;
+      })
+    );
+
+    setSyncFeedback(
+      `Order "${affectedClient || orderId}" Col AM set to "${canonicalStatus}". ${
+        canonicalStatus === 'Complete'
+          ? 'Full order moved automatically to "Closed Orders (Complete)"!'
+          : 'Active in "Product Automation".'
+      }`
+    );
+    setTimeout(() => setSyncFeedback(null), 4000);
+  };
+
+  // Handle changing Dispatch Qty in Col Y
+  const handleDispatchChange = (orderKey: string, item: { itemName: string; color: string; width: string }, newQtyStr: string) => {
+    const val = newQtyStr === '' ? 0 : (Number(newQtyStr) || 0);
+    const itemKey = `${orderKey}___${item.itemName.trim()}___${item.color.trim()}___${item.width.trim()}`;
+
+    setDispatchRecords(prev => ({
+      ...prev,
+      [itemKey]: val
+    }));
+  };
+
+  // Delete an entire order
+  const handleDeleteOrder = (orderKey: string, poName: string) => {
+    if (!window.confirm(`Are you sure you want to delete order "${poName}"?`)) return;
+    setRawResponses(prev =>
+      prev.filter(row => {
+        const key = [
+          row.customerPO,
+          row.customerName,
+          row.customerEmail,
+          row.customerNumber,
+          row.orderDate
+        ].map(v => (v || '').trim()).join('_');
+        return key !== orderKey;
+      })
+    );
+    setSyncFeedback(`Order ${poName} deleted successfully.`);
+    setTimeout(() => setSyncFeedback(null), 3500);
+  };
+
+  // Delete single item row
+  const handleDeleteItem = (itemOrderId: string) => {
+    setRawResponses(prev => prev.filter(row => row.orderId !== itemOrderId));
+    setSyncFeedback(`Item row removed.`);
+    setTimeout(() => setSyncFeedback(null), 3000);
+  };
+
+  // Clear / Delete all rows from Product Order tab (Wipes table to 0 rows for clean 1:1 fresh upload)
+  const handleClearAllProductOrders = async () => {
+    setRawResponses([]);
+    await clearOrdersFromStorage();
+    try {
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
+    } catch (e) {}
+    setSyncFeedback('✓ All rows deleted from Product Order tab. Ready for clean 1:1 fresh upload!');
+    setTimeout(() => setSyncFeedback(null), 4000);
+  };
+
+  // Clear all active orders from Product Automation tab (Unassigns SO# or wipes active items)
+  const handleClearProductAutomation = () => {
+    if (window.confirm("Are you sure you want to clear the Product Automation tab? Active Order Numbers will be unassigned so you can upload fresh automation data.")) {
+      setRawResponses(prev =>
+        prev.map(row => ({
+          ...row,
+          orderNo: '',
+          orderNoTimestamp: '',
+          statusAN: 'Open'
+        }))
+      );
+      setSyncFeedback("✓ Product Automation cleared! Orders unassigned and returned to pending in Product Order.");
+      setTimeout(() => setSyncFeedback(null), 4500);
+    }
+  };
+
+  // Full Clean Reset for New Project (Wipes all data to 0 rows for clean slate)
+  const handleFullProjectClean = async () => {
+    if (window.confirm("Full Clean Reset: Do you want to wipe all records (0 rows) to set up your new project with Google Sheet 1xSSZ6DyQarQJOd8UpOfCV-tjdKL1oQq_IKuXJkcRv5Q & Firebase project-vishal-team?")) {
+      setRawResponses([]);
+      await clearOrdersFromStorage();
+      try {
+        localStorage.removeItem(LOCAL_STORAGE_KEY);
+        localStorage.removeItem(LOCAL_STORAGE_DISPATCH_KEY);
+      } catch (e) {}
+      setImportSheetId('1xSSZ6DyQarQJOd8UpOfCV-tjdKL1oQq_IKuXJkcRv5Q');
+      setImportTabName('Product Order');
+      setFirebaseUrl('https://project-vishal-team-default-rtdb.firebaseio.com');
+      setSyncFeedback("✓ Full Project Clean complete (0 rows). Ready to connect your new Google Sheet & Firebase!");
+      setTimeout(() => setSyncFeedback(null), 5000);
+    }
+  };
+
+  // Add Item to existing order
+  const handleAddItemToExistingOrder = (order: GroupedOrder, newItemData: Partial<OrderItem>) => {
+    const newId = `ORD-${Date.now().toString().slice(-4)}`;
+    const newRow: ProductOrderRow = {
+      orderId: newId,
+      timestamp: order.timestamp,
+      customerPO: order.customerPO,
+      customerName: order.customerName,
+      customerEmail: order.customerEmail,
+      orderDate: order.orderDate,
+      unit: newItemData.unit || 'WARP(UDHANA)',
+      itemName: newItemData.itemName || 'L-4014/NS',
+      color: newItemData.color || 'White',
+      width: newItemData.width || '56"',
+      unitOfItem: newItemData.unitOfItem || 'MTR',
+      qty: Number(newItemData.qty) || 100,
+      rate: Number(newItemData.rate) || 150,
+      discount: Number(newItemData.discount) || 0,
+      deliveryDate: newItemData.deliveryDate || '15/11/2026',
+      remark: order.remark,
+      customerNumber: order.customerNumber,
+      billingAddress: order.billingAddress,
+      deliveryAddress: order.deliveryAddress,
+      transporterName: order.transporterName,
+      salesPerson: order.salesPerson,
+      accountStatus: order.accountStatus,
+      branch: order.branch,
+      approvalStatus: order.approvalStatus,
+      branchHeadName: '',
+      orderNo: order.orderNo,
+      statusAN: order.statusAN || 'Open'
+    };
+
+    setRawResponses(prev => [...prev, newRow]);
+    setAddingItemToOrder(null);
+    setSyncFeedback(`Added item "${newItemData.itemName}" to order ${order.customerPO}! Merged block expanded.`);
+    setTimeout(() => setSyncFeedback(null), 4000);
+  };
+
+  // Save new multi-item order from modal
+  const handleCreateNewOrder = (orderData: {
+    customerPO: string;
+    customerName: string;
+    customerEmail: string;
+    customerNumber: string;
+    orderDate: string;
+    billingAddress: string;
+    deliveryAddress: string;
+    transporterName: string;
+    salesPerson: string;
+    orderNo: string;
+    remark: string;
+    statusAN: 'Open' | 'In-Progress' | 'Closed';
+    items: Array<{
+      unit: string;
+      itemName: string;
+      color: string;
+      width: string;
+      unitOfItem: string;
+      qty: number;
+      rate: number;
+      discount: number;
+      deliveryDate: string;
+    }>;
+  }) => {
+    const nowStr = new Date().toLocaleString('en-IN');
+    const newRows: ProductOrderRow[] = orderData.items.map((it, idx) => ({
+      orderId: `ORD-${Date.now()}-${idx + 1}`,
+      timestamp: nowStr,
+      customerPO: orderData.customerPO,
+      customerName: orderData.customerName,
+      customerEmail: orderData.customerEmail,
+      orderDate: orderData.orderDate || new Date().toISOString().split('T')[0],
+      unit: it.unit || 'WARP(UDHANA)',
+      itemName: it.itemName,
+      color: it.color,
+      width: it.width,
+      unitOfItem: it.unitOfItem,
+      qty: Number(it.qty) || 0,
+      rate: Number(it.rate) || 0,
+      discount: Number(it.discount) || 0,
+      deliveryDate: it.deliveryDate,
+      remark: orderData.remark,
+      customerNumber: orderData.customerNumber,
+      billingAddress: orderData.billingAddress,
+      deliveryAddress: orderData.deliveryAddress,
+      transporterName: orderData.transporterName,
+      salesPerson: orderData.salesPerson,
+      accountStatus: 'Approved',
+      branch: 'Mumbai Central',
+      approvalStatus: 'APPROVED',
+      branchHeadName: orderData.salesPerson,
+      orderNo: orderData.orderNo,
+      statusAN: orderData.statusAN
+    }));
+
+    setRawResponses(prev => [...newRows, ...prev]);
+    setShowNewOrderModal(false);
+    setSyncFeedback(`New Order "${orderData.customerPO}" added with ${orderData.items.length} items!`);
+    setTimeout(() => setSyncFeedback(null), 4500);
+  };
+
+  // Reset to default sample data
+  const handleReset = () => {
+    if (window.confirm("Do you want to reset the sheet data to default sample records?")) {
+      setRawResponses(initialRawResponses);
+      setDispatchRecords(initialExistingDispatch);
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
+      localStorage.removeItem(LOCAL_STORAGE_DISPATCH_KEY);
+      setSyncFeedback("Reset to default sample data.");
+      setTimeout(() => setSyncFeedback(null), 3000);
+    }
+  };
+
+  // Generate or assign Order No for a row in Product Order sheet
+  const handleGenerateOrderNo = (orderId: string, customNo?: string) => {
+    const generatedNo = (customNo && customNo.trim() !== '')
+      ? customNo.trim()
+      : `DLFSO2526-0${Math.floor(1750 + Math.random() * 50)}`;
+    const nowStr = new Date().toLocaleString('en-IN');
+    let affectedItem = '';
+
+    setRawResponses(prev =>
+      prev.map(row => {
+        if (row.orderId === orderId) {
+          affectedItem = row.itemName;
+          return {
+            ...row,
+            orderNo: generatedNo,
+            orderNoTimestamp: nowStr,
+            statusAN: row.statusAN || 'Open' // By default, status in Col AN is Open
+          };
+        }
+        return row;
+      })
+    );
+
+    setSyncFeedback(
+      `Order No "${generatedNo}" assigned for ${affectedItem || orderId}! Order flowed into "Product Automation (Active Orders)" with Col AN default "Open".`
+    );
+    setTimeout(() => setSyncFeedback(null), 4500);
+  };
+
+  // Generate Order No for all pending rows in Product Order
+  const handleGenerateAllPendingOrderNo = () => {
+    let counter = 1752;
+    const nowStr = new Date().toLocaleString('en-IN');
+    let countGenerated = 0;
+
+    setRawResponses(prev =>
+      prev.map(row => {
+        if (!row.orderNo || row.orderNo.trim() === '') {
+          countGenerated++;
+          const genNo = `DLFSO2526-0${counter++}`;
+          return {
+            ...row,
+            orderNo: genNo,
+            orderNoTimestamp: nowStr,
+            statusAN: row.statusAN || 'Open'
+          };
+        }
+        return row;
+      })
+    );
+
+    setSyncFeedback(
+      `Generated Order Numbers for ${countGenerated} pending orders! All flowed to Product Automation (Active Orders) with Col AN default "Open".`
+    );
+    setTimeout(() => setSyncFeedback(null), 4500);
+  };
+
+  // Add new row into Product Order
+  const handleAddNewProductOrderRow = (newRow: ProductOrderRow) => {
+    setRawResponses(prev => [newRow, ...prev]);
+    setSyncFeedback(`New Order ${newRow.customerPO} (${newRow.referenceNo}) added to Product Order!`);
+    setTimeout(() => setSyncFeedback(null), 4000);
+  };
+
+  // Update row field in Product Order
+  const handleUpdateProductOrderRow = (orderId: string, field: keyof ProductOrderRow, value: any) => {
+    setRawResponses(prev =>
+      prev.map(row => (row.orderId === orderId ? { ...row, [field]: value } : row))
+    );
+  };
+
+  // Update Order No (Col X)
+  const handleSaveOrderNo = () => {
+    if (!editingOrderNo) return;
+    setRawResponses(prev =>
+      prev.map(row => {
+        const key = [
+          row.customerPO,
+          row.customerName,
+          row.customerEmail,
+          row.customerNumber,
+          row.orderDate
+        ].map(v => (v || '').trim()).join('_');
+
+        if (key === editingOrderNo.key) {
+          return {
+            ...row,
+            orderNo: editingOrderNo.value,
+            orderNoTimestamp: new Date().toLocaleString('en-IN'),
+            statusAN: row.statusAN || 'Open'
+          };
+        }
+        return row;
+      })
+    );
+    setSyncFeedback(`Order No for ${editingOrderNo.po} set to "${editingOrderNo.value}" in Col X!`);
+    setEditingOrderNo(null);
+    setTimeout(() => setSyncFeedback(null), 4000);
+  };
+
+  // Handlers for Operational Columns W, X, AC, AE, AF, AG, AH, AI, AJ, AL, AN
+  const handleToggleColAE = (orderKey: string, checked: boolean) => {
+    setColAEChecks(prev => {
+      const next = { ...prev, [orderKey]: checked };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AE_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+    if (checked) {
+      const ts = new Date().toLocaleString('en-IN', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+      });
+      setColAFTimestamps(prev => {
+        const next = { ...prev, [orderKey]: ts };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AF_KEY, JSON.stringify(next)); } catch (e) {}
+        return next;
+      });
+      setSyncFeedback(`Col AE Follow-up 1 Checked ✓ | Auto Timestamp set to ${ts} in Col AF`);
+    } else {
+      setColAFTimestamps(prev => {
+        const next = { ...prev, [orderKey]: '' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AF_KEY, JSON.stringify(next)); } catch (e) {}
+        return next;
+      });
+      setSyncFeedback(`Col AE Follow-up 1 Unchecked | Col AF Timestamp cleared`);
+    }
+    setTimeout(() => setSyncFeedback(null), 3500);
+  };
+  const handleToggleColAG = handleToggleColAE;
+
+  const handleUpdateColAG = (orderKey: string, val: string) => {
+    setColAGRemarks(prev => {
+      const next = { ...prev, [orderKey]: val };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AG_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  };
+  const handleUpdateColAI = handleUpdateColAG;
+
+  const handleToggleColAH = (orderKey: string, checked: boolean) => {
+    setColAHChecks(prev => {
+      const next = { ...prev, [orderKey]: checked };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AH_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+    if (checked) {
+      const ts = new Date().toLocaleString('en-IN', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
+      });
+      setColAITimestamps(prev => {
+        const next = { ...prev, [orderKey]: ts };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AI_KEY, JSON.stringify(next)); } catch (e) {}
+        return next;
+      });
+      setSyncFeedback(`Col AH Follow-up 2 Checked ✓ | Auto Timestamp set to ${ts} in Col AI`);
+    } else {
+      setColAITimestamps(prev => {
+        const next = { ...prev, [orderKey]: '' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AI_KEY, JSON.stringify(next)); } catch (e) {}
+        return next;
+      });
+      setSyncFeedback(`Col AH Follow-up 2 Unchecked | Col AI Timestamp cleared`);
+    }
+    setTimeout(() => setSyncFeedback(null), 3500);
+  };
+  const handleToggleColAJ = handleToggleColAH;
+
+  const handleUpdateColAJ = (orderKey: string, val: string) => {
+    setColAJRemarks(prev => {
+      const next = { ...prev, [orderKey]: val };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AJ_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  };
+  const handleUpdateColAL = handleUpdateColAJ;
+
+  const handleUpdateColW = (orderKey: string, val: string) => {
+    setColWStatuses(prev => {
+      const next = { ...prev, [orderKey]: val };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_W_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  };
+  const handleUpdateColAA = handleUpdateColW;
+
+  const handleUpdateColX = (orderKey: string, val: string) => {
+    setColXRemarks(prev => {
+      const next = { ...prev, [orderKey]: val };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_X_KEY, JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+  };
+  const handleUpdateColAB = handleUpdateColX;
+
+  // Export entire sheet as CSV (Exact 45 Columns from user's specification)
+  const handleExportCSV = () => {
+    const headers = [
+      'Timestamp', 'Customer PO', 'Customer Name', 'Customer Email', 'Order Date',
+      'Unit', 'Item Name', 'Color', 'Width', 'Unit (of Item)', 'Qty', 'Rate', 'Discount', 'Delivery Date',
+      'Remark', 'Customer Number', 'Billing Address', 'Delivery Address', 'Transporter Name',
+      'Sales Person Name', 'Account Status', 'Approval', 'Timestamp', 'Order Number',
+      'Dispatch Qnt', 'Balance Qnt', 'Status', 'Remark', 'Confirmation Mail', 'Mail Status',
+      'Confirmation Msg', 'Whatspp Link', 'Follow-up 1', 'Timestamp', 'Follow-up 1 Remark',
+      'Follow-up 2', 'Timestamp', 'Follow-up 2 Remark', 'LR- Number', 'Open / Close',
+      'Delivered Whatspp Msg', 'Whatspp Link', 'Delivery Email', 'Delivery Email Link', 'Email Status Column'
+    ];
+
+    const rows: string[][] = [];
+
+    groupedOrders.forEach(order => {
+      order.items.forEach(item => {
+        rows.push([
+          `"${order.timestamp || ''}"`,
+          `"${order.customerPO || ''}"`,
+          `"${order.customerName || ''}"`,
+          `"${order.customerEmail || ''}"`,
+          `"${order.orderDate || ''}"`,
+          `"${item.unit || ''}"`,
+          `"${item.itemName || ''}"`,
+          `"${item.color || ''}"`,
+          `"${item.width || ''}"`,
+          `"${item.unitOfItem || ''}"`,
+          `${item.qty}`,
+          `${item.rate}`,
+          `${item.discount}`,
+          `"${item.deliveryDate || ''}"`,
+          `"${(order.remark || '').replace(/"/g, '""')}"`,
+          `"${order.customerNumber || ''}"`,
+          `"${(order.billingAddress || '').replace(/"/g, '""')}"`,
+          `"${(order.deliveryAddress || '').replace(/"/g, '""')}"`,
+          `"${order.transporterName || ''}"`,
+          `"${order.salesPerson || ''}"`,
+          `"${order.accountStatus || ''}"`,
+          `"${order.approvalStatus || ''}"`,
+          `"${order.branch || ''}"`,
+          `"${order.orderNo || ''}"`,
+          `${item.dispatchQty || 0}`,
+          `${item.balanceQty || 0}`,
+          `"${colAAStatuses[order.orderKey] || 'In Production'}"`,
+          `"${(colABRemarks[order.orderKey] || '').replace(/"/g, '""')}"`,
+          `"Sent"`,
+          `"Delivered"`,
+          `"${aeStatuses[order.orderKey] || 'Pending'}"`,
+          `"${(aeStatuses[order.orderKey] || 'Pending') === 'Message Sent' ? 'Sent WA' : ''}"`,
+          `"${colAGChecks[order.orderKey] ? 'Yes' : 'No'}"`,
+          `"${colAHTimestamps[order.orderKey] || ''}"`,
+          `"${(colAIRemarks[order.orderKey] || '').replace(/"/g, '""')}"`,
+          `"${colAJChecks[order.orderKey] ? 'Yes' : 'No'}"`,
+          `"${colAKTimestamps[order.orderKey] || ''}"`,
+          `"${(colALRemarks[order.orderKey] || '').replace(/"/g, '""')}"`,
+          `"${lrNumbers[order.orderKey] || ''}"`,
+          `"${order.statusAN || 'Open'}"`,
+          `"${aoStatuses[order.orderKey] || 'Pending'}"`,
+          `"${aoStatuses[order.orderKey] === 'Message Sent' ? 'Sent Messages' : ''}"`,
+          `"${order.customerEmail || ''}"`,
+          `""`,
+          `"Sent"`
+        ]);
+      });
+    });
+
+    const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows.map(e => e.join(','))].join('\n');
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement('a');
+    link.setAttribute('href', encodedUri);
+    link.setAttribute('download', `GINZA_Product_Automation_45Col_${new Date().toISOString().split('T')[0]}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    setSyncFeedback('Downloaded 45-Column GINZA FMS CSV file ready for Excel / Google Sheet!');
+    setTimeout(() => setSyncFeedback(null), 3500);
+  };
+
+  // Helper: Extract Clean Google Sheet ID from URL or Raw ID
+  const extractSheetId = (input: string): string => {
+    const trimmed = input.trim();
+    const match = trimmed.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+    if (match && match[1]) {
+      return match[1];
+    }
+    return trimmed;
+  };
+
+  // Helper: Push order rows to Firebase Realtime Database
+  const pushOrdersToFirebase = async (
+    rowsToSync: ProductOrderRow[],
+    customUrl?: string,
+    customSecret?: string
+  ): Promise<{ activeOrders: number; closedOrders: number; totalRows: number }> => {
+    const targetUrl = (customUrl || firebaseUrl || 'https://ginza-fms-default-rtdb.firebaseio.com').trim().replace(/\/+$/, '');
+    const targetSecret = (customSecret !== undefined ? customSecret : firebaseSecret || 'iIElINFgR124ssaG3QWjExz2lT72cRh5g502oP6J').trim();
+
+    if (!targetUrl) {
+      throw new Error('Firebase Realtime Database URL not specified.');
+    }
+
+    const authParam = targetSecret ? `?auth=${encodeURIComponent(targetSecret)}` : '';
+
+    // Group rows by orderKey
+    const tempGroupMap: Record<string, ProductOrderRow[]> = {};
+    rowsToSync.forEach(r => {
+      const k = `${r.customerPO || 'NOPO'}_${r.customerName || 'NOCUST'}_${r.orderNo || r.orderDate || 'NODATE'}`;
+      if (!tempGroupMap[k]) tempGroupMap[k] = [];
+      tempGroupMap[k].push(r);
+    });
+
+    const automationPayload: Record<string, any> = {};
+    const closedPayload: Record<string, any> = {};
+
+    Object.entries(tempGroupMap).forEach(([rawKey, items]) => {
+      const first = items[0];
+      const safeKey = rawKey.replace(/[.#$/\[\]]/g, '_').substring(0, 100);
+
+      const activeItems = items.filter(it => (it.statusAN || 'Open') !== 'Closed');
+      const closedItems = items.filter(it => (it.statusAN || 'Open') === 'Closed');
+
+      if (activeItems.length > 0) {
+        automationPayload[safeKey] = {
+          order_key: safeKey,
+          customer_po: first.customerPO,
+          customer_name: first.customerName,
+          customer_email: first.customerEmail,
+          order_date: first.orderDate,
+          order_no: first.orderNo || '',
+          sales_person: first.salesPerson,
+          transporter_name: first.transporterName,
+          billing_address: first.billingAddress,
+          delivery_address: first.deliveryAddress,
+          customer_number: first.customerNumber,
+          remark: first.remark,
+          status: first.statusAN || 'Open',
+          items: activeItems.map((it, idx) => ({
+            item_index: idx + 1,
+            item_name: it.itemName,
+            color: it.color,
+            width: it.width,
+            unit: it.unitOfItem || it.unit,
+            qty: it.qty,
+            rate: it.rate,
+            discount: it.discount,
+            delivery_date: it.deliveryDate,
+            dispatch_qty: it.dispatchQty || 0,
+            balance_qty: it.balanceQty || it.qty,
+            status: it.statusAN || 'Open'
+          })),
+          total_qty: activeItems.reduce((s, it) => s + it.qty, 0),
+          total_dispatch_qty: activeItems.reduce((s, it) => s + (it.dispatchQty || 0), 0),
+          total_balance_qty: activeItems.reduce((s, it) => s + (it.balanceQty || it.qty), 0),
+          last_synced_at: new Date().toISOString()
+        };
+      }
+
+      if (closedItems.length > 0) {
+        closedPayload[safeKey] = {
+          order_key: safeKey,
+          customer_po: first.customerPO,
+          customer_name: first.customerName,
+          customer_email: first.customerEmail,
+          order_date: first.orderDate,
+          order_no: first.orderNo || '',
+          sales_person: first.salesPerson,
+          transporter_name: first.transporterName,
+          billing_address: first.billingAddress,
+          delivery_address: first.deliveryAddress,
+          customer_number: first.customerNumber,
+          remark: first.remark,
+          status: 'Closed',
+          items: closedItems.map((it, idx) => ({
+            item_index: idx + 1,
+            item_name: it.itemName,
+            color: it.color,
+            width: it.width,
+            unit: it.unitOfItem || it.unit,
+            qty: it.qty,
+            rate: it.rate,
+            discount: it.discount,
+            delivery_date: it.deliveryDate,
+            dispatch_qty: it.dispatchQty || 0,
+            balance_qty: it.balanceQty || 0,
+            status: 'Closed'
+          })),
+          total_qty: closedItems.reduce((s, it) => s + it.qty, 0),
+          total_dispatch_qty: closedItems.reduce((s, it) => s + (it.dispatchQty || 0), 0),
+          total_balance_qty: closedItems.reduce((s, it) => s + (it.balanceQty || 0), 0),
+          last_synced_at: new Date().toISOString()
+        };
+      }
+    });
+
+    // Send PATCH to /product_automation.json
+    if (Object.keys(automationPayload).length > 0) {
+      const resp = await fetch(`${targetUrl}/product_automation.json${authParam}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(automationPayload)
+      });
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`Firebase HTTP ${resp.status}: ${text.substring(0, 150)}`);
+      }
+    }
+
+    // Send PATCH to /closed_orders.json
+    if (Object.keys(closedPayload).length > 0) {
+      const resp2 = await fetch(`${targetUrl}/closed_orders.json${authParam}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(closedPayload)
+      });
+      if (!resp2.ok) {
+        const text = await resp2.text();
+        throw new Error(`Firebase HTTP ${resp2.status}: ${text.substring(0, 150)}`);
+      }
+    }
+
+    return {
+      activeOrders: Object.keys(automationPayload).length,
+      closedOrders: Object.keys(closedPayload).length,
+      totalRows: rowsToSync.length
+    };
+  };
+
+  // Helper: Robust CSV parser respecting quotes and newlines
+  const parseCsvRows = (text: string): string[][] => {
+    const rows: string[][] = [];
+    let currentRow: string[] = [];
+    let currentCell = '';
+    let inQuotes = false;
+
+    for (let i = 0; i < text.length; i++) {
+      const char = text[i];
+      const nextChar = text[i + 1];
+
+      if (char === '"') {
+        if (inQuotes && nextChar === '"') {
+          currentCell += '"';
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if ((char === ',' || char === '\t') && !inQuotes) {
+        currentRow.push(currentCell.trim());
+        currentCell = '';
+      } else if ((char === '\r' || char === '\n') && !inQuotes) {
+        if (char === '\r' && nextChar === '\n') {
+          i++;
+        }
+        currentRow.push(currentCell.trim());
+        if (currentRow.some(c => c.length > 0)) {
+          rows.push(currentRow);
+        }
+        currentRow = [];
+        currentCell = '';
+      } else {
+        currentCell += char;
+      }
+    }
+
+    if (currentCell.length > 0 || currentRow.length > 0) {
+      currentRow.push(currentCell.trim());
+      if (currentRow.some(c => c.length > 0)) {
+        rows.push(currentRow);
+      }
+    }
+
+    return rows;
+  };
+
+  // Direct Excel / CSV Paste or Google Sheet Fetch Data Parser
+  const handleParseImportedData = async (
+    text: string,
+    syncFirebase: boolean = true,
+    sourceLabel: string = 'Import'
+  ) => {
+    if (!text.trim()) return;
+
+    const parsedRows = parseCsvRows(text.trim());
+    if (parsedRows.length === 0) {
+      setImportError('Sheet data me koi valid rows nahi mili.');
+      return;
+    }
+
+    const newItems: ProductOrderRow[] = [];
+    const importedColW: Record<string, string> = {};
+    const importedColX: Record<string, string> = {};
+    const importedColAC: Record<string, string> = {};
+    const importedColAE: Record<string, boolean> = {};
+    const importedColAF: Record<string, string> = {};
+    const importedColAG: Record<string, string> = {};
+    const importedColAH: Record<string, boolean> = {};
+    const importedColAI: Record<string, string> = {};
+    const importedColAJ: Record<string, string> = {};
+    const importedColAL: Record<string, string> = {};
+    const importedColAN: Record<string, string> = {};
+    const importedDispatch: Record<string, number> = {};
+
+    let currentPO = 'IMPORT-PO';
+    let currentName = 'Direct Imported Client';
+    let currentDate = new Date().toLocaleDateString('en-GB');
+    let currentEmail = 'N/A';
+    let currentBilling = '';
+    let currentDelivery = '';
+    let currentTransporter = 'SafeXpress';
+    let currentSalesPerson = 'Lalit Maroo';
+    let currentOrderNo = '';
+    let currentRemark = '';
+
+    parsedRows.forEach((cols, index) => {
+      const firstColLower = (cols[0] || '').toLowerCase().trim();
+      const secondColLower = (cols[1] || '').toLowerCase().trim();
+      const thirdColLower = (cols[2] || '').toLowerCase().trim();
+      const fourthColLower = (cols[3] || '').toLowerCase().trim();
+
+      // Skip header row if it contains header keywords
+      if (
+        index === 0 &&
+        (firstColLower.includes('timestamp') ||
+          firstColLower.includes('order no') ||
+          firstColLower.includes('order') ||
+          secondColLower.includes('customer') ||
+          secondColLower.includes('timestamp') ||
+          thirdColLower.includes('po') ||
+          fourthColLower.includes('customer') ||
+          firstColLower.includes('#'))
+      ) {
+        return;
+      }
+
+      if (cols.length < 2) return;
+
+      // Prioritize 43-column Product Automation format if cols >= 26
+      const is43ColFormat = cols.length >= 26;
+      const is19ColFormat = !is43ColFormat && (cols.length >= 14);
+
+      if (is19ColFormat) {
+        // Exact 19-column Product Order layout (Columns A to S)
+        // Col 0 (A): Timestamp
+        // Col 1 (B): Customer Name
+        // Col 2 (C): Order Date
+        // Col 3 (D): Unit
+        // Col 4 (E): Item Name
+        // Col 5 (F): Color
+        // Col 6 (G): Width
+        // Col 7 (H): Unit (of item)
+        // Col 8 (I): Qty
+        // Col 9 (J): Rate
+        // Col 10 (K): Discount
+        // Col 11 (L): Delivery Date
+        // Col 12 (M): Remark
+        // Col 13 (N): Customer Number
+        // Col 14 (O): Billing Address
+        // Col 15 (P): Delivery Address
+        // Col 16 (Q): Sales Person Name
+        // Col 17 (R): Sales Person Contact
+        // Col 18 (S): Order Number
+
+        const timestamp = cols[0] ? cols[0].trim() : '';
+        const custName = cols[1] ? cols[1].trim() : '';
+        const date = cols[2] ? cols[2].trim() : '';
+        const unit = cols[3] ? cols[3].trim() : '';
+        const itemName = cols[4] ? cols[4].trim() : '';
+        const color = cols[5] ? cols[5].trim() : '';
+        const width = cols[6] ? cols[6].trim() : '';
+        const unitOfItem = cols[7] ? cols[7].trim() : '';
+        const qty = cols[8] ? (parseFloat(cols[8].replace(/,/g, '')) || 0) : 0;
+        const rate = cols[9] ? (parseFloat(cols[9].replace(/,/g, '')) || 0) : 0;
+        const discount = cols[10] ? (parseFloat(cols[10].replace(/,/g, '')) || 0) : 0;
+        const deliveryDate = cols[11] ? cols[11].trim() : '';
+        const remark = cols[12] ? cols[12].trim() : '';
+        const phone = cols[13] ? cols[13].trim() : '';
+        const billing = cols[14] ? cols[14].trim() : '';
+        const delivery = cols[15] ? cols[15].trim() : '';
+        const sales = cols[16] ? cols[16].trim() : '';
+        const salesContact = cols[17] ? cols[17].trim() : '';
+        const orderNo = cols[18] ? cols[18].trim() : '';
+
+        newItems.push({
+          orderId: `ORD-IMP-${index + 1}-${Date.now().toString(36)}`,
+          timestamp: timestamp || new Date().toLocaleString('en-IN'),
+          customerName: custName,
+          customerPO: '',
+          customerEmail: '',
+          orderDate: date,
+          unit: unit,
+          itemName: itemName,
+          color: color,
+          width: width,
+          unitOfItem: unitOfItem,
+          qty: qty,
+          rate: rate,
+          discount: discount,
+          deliveryDate: deliveryDate,
+          remark: remark,
+          customerNumber: phone,
+          billingAddress: billing,
+          deliveryAddress: delivery,
+          salesPerson: sales,
+          salesPersonContact: salesContact,
+          orderNo: orderNo,
+          orderNoTimestamp: orderNo ? new Date().toLocaleString('en-IN') : '',
+          statusAN: 'Open',
+          dispatchQty: 0,
+          balanceQty: qty
+        });
+      } else if (is43ColFormat) {
+        // Exact 43-column Product Automation layout (Columns A to AQ)
+        const timestamp = cols[0] ? cols[0].trim() : '';
+        const custName = cols[1] ? cols[1].trim() : '';
+        const date = cols[2] ? cols[2].trim() : '';
+        const unit = cols[3] ? cols[3].trim() : '';
+        const itemName = cols[4] ? cols[4].trim() : '';
+        const color = cols[5] ? cols[5].trim() : '';
+        const width = cols[6] ? cols[6].trim() : '';
+        const unitOfItem = cols[7] ? cols[7].trim() : '';
+        const qty = cols[8] ? (parseFloat(cols[8].replace(/,/g, '')) || 0) : 0;
+        const rate = cols[9] ? (parseFloat(cols[9].replace(/,/g, '')) || 0) : 0;
+        const discount = cols[10] ? (parseFloat(cols[10].replace(/,/g, '')) || 0) : 0;
+        const deliveryDate = cols[11] ? cols[11].trim() : '';
+        const remark = cols[12] ? cols[12].trim() : '';
+        const phone = cols[13] ? cols[13].trim() : '';
+        const billing = cols[14] ? cols[14].trim() : '';
+        const delivery = cols[15] ? cols[15].trim() : '';
+        const sales = cols[16] ? cols[16].trim() : '';
+        const salesContact = cols[17] ? cols[17].trim() : '';
+        const orderNo = cols[18] ? cols[18].trim() : '';
+        const customerMailId = cols[19] ? cols[19].trim() : '';
+        const rawDispatch = cols[20] !== undefined ? cols[20].trim() : '';
+        const dispatchQty = rawDispatch ? (parseFloat(rawDispatch.replace(/,/g, '')) || 0) : 0;
+        const balanceQty = cols[21] ? (parseFloat(cols[21].replace(/,/g, '')) || Math.max(0, qty - dispatchQty)) : Math.max(0, qty - dispatchQty);
+        const statusVal = cols[22] ? cols[22].trim() : '';
+        const approvalVal = cols[24] ? cols[24].trim() : 'APPROVED';
+        const transporterVal = cols[36] ? cols[36].trim() : '';
+        const rawOpenClose = (cols[38] || '').trim();
+        const openCloseVal = rawOpenClose.toLowerCase();
+        let statusAN: 'Open' | 'In-Progress' | 'Complete' | 'Closed' = 'Open';
+        if (isItemComplete(openCloseVal) || isItemComplete(statusVal)) {
+          statusAN = 'Complete';
+        } else if (openCloseVal.includes('prog') || statusVal.toLowerCase().includes('prog')) {
+          statusAN = 'In-Progress';
+        } else {
+          // In Google Sheet: Blank means open, Complete means closed
+          statusAN = 'Open';
+        }
+
+        const orderKey = [
+          '',
+          custName,
+          customerMailId,
+          phone,
+          date
+        ].map(v => (v || '').trim()).join('_');
+
+        if (cols[22]) importedColW[orderKey] = cols[22].trim();
+        if (cols[23]) importedColX[orderKey] = cols[23].trim();
+        if (cols[28]) importedColAC[orderKey] = cols[28].trim();
+        if (cols[30]) {
+          const val30 = cols[30].trim().toLowerCase();
+          importedColAE[orderKey] = ['yes', 'true', '✓', 'checked', '1'].includes(val30);
+        }
+        if (cols[31]) importedColAF[orderKey] = cols[31].trim();
+        if (cols[32]) importedColAG[orderKey] = cols[32].trim();
+        if (cols[33]) {
+          const val33 = cols[33].trim().toLowerCase();
+          importedColAH[orderKey] = ['yes', 'true', '✓', 'checked', '1'].includes(val33);
+        }
+        if (cols[34]) importedColAI[orderKey] = cols[34].trim();
+        if (cols[35]) importedColAJ[orderKey] = cols[35].trim();
+        if (cols[37]) importedColAL[orderKey] = cols[37].trim();
+        if (cols[39]) importedColAN[orderKey] = cols[39].trim();
+
+        const itemKey = `${orderKey}___${itemName.trim()}___${color.trim()}___${width.trim()}`;
+        if (rawDispatch !== '') {
+          importedDispatch[itemKey] = dispatchQty;
+        }
+
+        newItems.push({
+          orderId: `ORD-IMP-${index + 1}-${Date.now().toString(36)}`,
+          timestamp: timestamp || new Date().toLocaleString('en-IN'),
+          customerName: custName,
+          orderDate: date,
+          unit: unit,
+          itemName: itemName,
+          color: color,
+          width: width,
+          unitOfItem: unitOfItem,
+          qty: qty,
+          rate: rate,
+          discount: discount,
+          deliveryDate: deliveryDate,
+          remark: remark,
+          customerNumber: phone,
+          billingAddress: billing,
+          deliveryAddress: delivery,
+          salesPerson: sales,
+          salesPersonContact: salesContact,
+          orderNo: orderNo,
+          customerEmail: customerMailId,
+          customerMailId: customerMailId,
+          transporterName: transporterVal,
+          approvalStatus: approvalVal,
+          orderNoTimestamp: orderNo ? (cols[25] || new Date().toLocaleString('en-IN')) : '',
+          statusAN: statusAN,
+          dispatchQty: dispatchQty,
+          balanceQty: Math.max(0, balanceQty)
+        });
+      } else {
+        // Fallback layout
+        const po = cols[1] || currentPO;
+        const custName = cols[2] || cols[1] || currentName;
+        const email = cols[3] || currentEmail;
+        const date = cols[4] || cols[2] || currentDate;
+        const unit = cols[5] || 'WARP(UDHANA)';
+        const itemName = cols[6] || cols[4] || `Imported Item ${index}`;
+        const color = cols[7] || cols[5] || 'White';
+        const width = cols[8] || cols[6] || '56"';
+        const unitOfItem = cols[9] || cols[7] || 'MTR';
+        const qty = cols[10] ? (parseFloat(cols[10].replace(/,/g, '')) || 0) : (cols[8] ? parseFloat(cols[8].replace(/,/g, '')) || 0 : 0);
+        const rate = cols[11] ? (parseFloat(cols[11].replace(/,/g, '')) || 0) : (cols[9] ? parseFloat(cols[9].replace(/,/g, '')) || 0 : 0);
+        const discount = cols[12] ? (parseFloat(cols[12].replace(/,/g, '')) || 0) : 0;
+        const deliveryDate = cols[13] || cols[11] || '';
+        const remark = cols[14] || cols[12] || currentRemark;
+        const phone = cols[15] || cols[13] || '';
+        const billing = cols[16] || cols[14] || currentBilling;
+        const delivery = cols[17] || cols[15] || currentDelivery;
+        const transporter = cols[18] || currentTransporter;
+        const sales = cols[19] || cols[16] || currentSalesPerson;
+        const orderNo = cols[23] || cols[18] || currentOrderNo;
+        const dispatchQty = cols[24] ? (parseFloat(cols[24].replace(/,/g, '')) || 0) : 0;
+
+        newItems.push({
+          orderId: `IMP-${Date.now()}-${index}`,
+          referenceNo: cols[0] || '',
+          timestamp: cols[0] || new Date().toLocaleString('en-IN'),
+          customerPO: po,
+          customerName: custName,
+          customerEmail: email,
+          orderDate: date,
+          unit: unit,
+          itemName: itemName,
+          color: color,
+          width: width,
+          unitOfItem: unitOfItem,
+          qty: qty,
+          rate: rate,
+          discount: discount,
+          deliveryDate: deliveryDate,
+          remark: remark,
+          customerNumber: phone,
+          billingAddress: billing,
+          deliveryAddress: delivery,
+          transporterName: transporter,
+          salesPerson: sales,
+          orderNo: orderNo,
+          orderNoTimestamp: new Date().toLocaleString('en-IN'),
+          statusAN: 'Open',
+          dispatchQty: dispatchQty,
+          balanceQty: Math.max(0, qty - dispatchQty)
+        });
+      }
+    });
+
+    if (newItems.length > 0) {
+      if (Object.keys(importedColW).length > 0) setColWStatuses(prev => ({ ...prev, ...importedColW }));
+      if (Object.keys(importedColX).length > 0) setColXRemarks(prev => ({ ...prev, ...importedColX }));
+      if (Object.keys(importedColAC).length > 0) setAcStatuses(prev => ({ ...prev, ...importedColAC }));
+      if (Object.keys(importedColAE).length > 0) setColAEChecks(prev => ({ ...prev, ...importedColAE }));
+      if (Object.keys(importedColAF).length > 0) setColAFTimestamps(prev => ({ ...prev, ...importedColAF }));
+      if (Object.keys(importedColAG).length > 0) setColAGRemarks(prev => ({ ...prev, ...importedColAG }));
+      if (Object.keys(importedColAH).length > 0) setColAHChecks(prev => ({ ...prev, ...importedColAH }));
+      if (Object.keys(importedColAI).length > 0) setColAITimestamps(prev => ({ ...prev, ...importedColAI }));
+      if (Object.keys(importedColAJ).length > 0) setColAJRemarks(prev => ({ ...prev, ...importedColAJ }));
+      if (Object.keys(importedColAL).length > 0) setLrNumbers(prev => ({ ...prev, ...importedColAL }));
+      if (Object.keys(importedColAN).length > 0) setAnStatuses(prev => ({ ...prev, ...importedColAN }));
+      if (Object.keys(importedDispatch).length > 0) setDispatchRecords(prev => ({ ...prev, ...importedDispatch }));
+
+      if (importReplaceMode) {
+        setRawResponses(newItems);
+      } else {
+        setRawResponses(prev => [...newItems, ...prev]);
+      }
+      setShowImportModal(false);
+      setPastedDataText('');
+      setImportError(null);
+      setImportError(null);
+
+      // Auto-Sync to Firebase if enabled
+      if (syncFirebase && firebaseUrl) {
+        setSyncFeedback(`Imported ${newItems.length} rows! Pushing to Firebase Cloud Database...`);
+        try {
+          const syncRes = await pushOrdersToFirebase(newItems);
+          setSyncFeedback(
+            `✓ Successfully imported ${newItems.length} rows from "${sourceLabel}" & saved ${syncRes.activeOrders + syncRes.closedOrders} orders to Firebase!`
+          );
+        } catch (fbErr: any) {
+          console.warn('Firebase sync warning:', fbErr);
+          setSyncFeedback(
+            `✓ Imported ${newItems.length} rows into application! (Firebase note: ${fbErr.message || 'Check URL/Secret'})`
+          );
+        }
+      } else {
+        setSyncFeedback(`✓ Successfully imported ${newItems.length} rows from "${sourceLabel}" into application!`);
+      }
+
+      setTimeout(() => setSyncFeedback(null), 5000);
+    } else {
+      setImportError('Koi valid data row import nahi ho saki. Kripya column structure verify karein.');
+    }
+  };
+
+  // Google Sheet Direct Fetch and Import Handler
+  const handleFetchFromGoogleSheet = async () => {
+    const cleanId = extractSheetId(importSheetId);
+    if (!cleanId) {
+      setImportError('Kripya valid Google Sheet ID ya full Google Sheets URL enter karein.');
+      return;
+    }
+    if (!importTabName.trim()) {
+      setImportError('Kripya Tab / Sheet ka naam enter karein (e.g. Product Automation, Product Order).');
+      return;
+    }
+
+    setIsFetchingSheet(true);
+    setImportError(null);
+
+    // Google Sheets Visualization API CSV export endpoint:
+    const gvizUrl = `https://docs.google.com/spreadsheets/d/${cleanId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(importTabName.trim())}`;
+
+    try {
+      const resp = await fetch(gvizUrl);
+      if (!resp.ok) {
+        throw new Error(`Google Sheets responded with HTTP status ${resp.status}`);
+      }
+      const csvText = await resp.text();
+      if (!csvText || csvText.trim().length === 0) {
+        throw new Error(`Tab "${importTabName}" me koi data nahi mila ya tab exist nahi karta.`);
+      }
+
+      // Check if Google returned an HTML login/permission page
+      if (csvText.startsWith('<!DOCTYPE html>') || csvText.includes('<html')) {
+        throw new Error('Google Sheet private hai ya access restricted hai. Sheet ko Share > "Anyone with the link can view" karein, ya "Paste (Ctrl+V)" tab use karein.');
+      }
+
+      // Parse and import data
+      await handleParseImportedData(csvText, autoSyncToFirebase, `Google Sheet Tab: ${importTabName.trim()}`);
+    } catch (err: any) {
+      console.error('Google Sheet Import Error:', err);
+      setImportError(
+        err.message || 'Google Sheet se data fetch karne me error aayi. Kripya check karein ki Sheet me Share -> "Anyone with the link can view" active hai.'
+      );
+    } finally {
+      setIsFetchingSheet(false);
+    }
+  };
+
+  // 1-Click Upload all current Sheet Data to Firebase Realtime Database
+  const handleUploadToFirebase = async () => {
+    try {
+      setUploadProgress(20);
+      setSyncFeedback('Connecting to Firebase Realtime Database...');
+
+      // Save current config in localStorage
+      localStorage.setItem(
+        LOCAL_STORAGE_FIREBASE_CONFIG,
+        JSON.stringify({
+          url: firebaseUrl,
+          secret: firebaseSecret
+        })
+      );
+
+      setUploadProgress(50);
+      const res = await pushOrdersToFirebase(rawResponses);
+      setUploadProgress(100);
+      setSyncFeedback(
+        `✓ Successfully uploaded all ${res.activeOrders + res.closedOrders} orders (${res.totalRows} rows) to Firebase Realtime Database!`
+      );
+      setTimeout(() => {
+        setShowFirebaseModal(false);
+        setUploadProgress(null);
+        setSyncFeedback(null);
+      }, 3500);
+    } catch (err: any) {
+      console.error('Firebase Upload Error:', err);
+      setUploadProgress(null);
+      setSyncFeedback(`Firebase Upload Error: ${err.message || 'Check URL & Secret'}`);
+      setTimeout(() => setSyncFeedback(null), 5000);
+    }
+  };
+
+  // Filter orders based on activeSheetTab & statusFilter & search & column filters
+  // When an order has multiple items, closed items show in "Closed Orders" and active items in "Product Automation"!
+  const filteredOrders = useMemo(() => {
+    const result: GroupedOrder[] = [];
+
+    groupedOrders.forEach(order => {
+      // In "Product Automation (Active Orders)" and "Closed Orders":
+      // An order ONLY flows in once its Order Number has been assigned/entered in "Product Order"!
+      if (activeSheetTab === 'automation' || activeSheetTab === 'closed') {
+        if (!order.orderNo || order.orderNo.trim() === '') {
+          return;
+        }
+      }
+
+      // User rule: "AM me jinka status complete he wo full row wali order Closed he to usko autoamatic closed order sheet me dal dena . complete hoga means full records closed he."
+      const isOrderComplete = isItemComplete(order.statusAN) || order.items.some(it => isItemComplete(it.statusAN));
+
+      // 1. Tab filter
+      if (activeSheetTab === 'automation') {
+        // If statusFilter is 'ALL' or 'Complete', allow viewing complete orders even in automation tab!
+        if (isOrderComplete && statusFilter !== 'ALL' && statusFilter !== 'Complete') return; // By default, only active open orders
+      } else if (activeSheetTab === 'closed') {
+        if (!isOrderComplete) return; // Only complete orders show in closed tab!
+      }
+
+      // 2. Toolbar Status dropdown filter
+      if (statusFilter !== 'ALL') {
+        if (statusFilter === 'Closed' || statusFilter === 'Complete') {
+          if (!isOrderComplete) return;
+        } else if (statusFilter === 'Open') {
+          if (isOrderComplete || order.statusAN === 'In-Progress') return;
+        } else if (statusFilter === 'In-Progress') {
+          if (order.statusAN !== 'In-Progress') return;
+        }
+      }
+
+      // Filter items according to column filters (D to L, U, V, AM)
+      const relevantItems = order.items.filter(item => {
+        const itemStatus = isItemComplete(item.statusAN) ? 'Complete' : (item.statusAN || 'Open');
+
+        if (colFilters['D'] && colFilters['D'].length > 0 && !colFilters['D'].includes(item.unit || '')) return false;
+        if (colFilters['E'] && colFilters['E'].length > 0 && !colFilters['E'].includes(item.itemName || '')) return false;
+        if (colFilters['F'] && colFilters['F'].length > 0 && !colFilters['F'].includes(item.color || '')) return false;
+        if (colFilters['G'] && colFilters['G'].length > 0 && !colFilters['G'].includes(item.width || '')) return false;
+        if (colFilters['H'] && colFilters['H'].length > 0 && !colFilters['H'].includes(item.unitOfItem || '')) return false;
+        if (colFilters['I'] && colFilters['I'].length > 0 && !colFilters['I'].includes(String(item.qty || ''))) return false;
+        if (colFilters['J'] && colFilters['J'].length > 0 && !colFilters['J'].includes(String(item.rate || ''))) return false;
+        if (colFilters['K'] && colFilters['K'].length > 0 && !colFilters['K'].includes(String(item.discount || ''))) return false;
+        if (colFilters['L'] && colFilters['L'].length > 0 && !colFilters['L'].includes(item.deliveryDate || '')) return false;
+        if (colFilters['U'] && colFilters['U'].length > 0 && !colFilters['U'].includes(String(item.dispatchQty ?? 0))) return false;
+        if (colFilters['V'] && colFilters['V'].length > 0 && !colFilters['V'].includes(String(item.balanceQty ?? ''))) return false;
+        if (colFilters['AM'] && colFilters['AM'].length > 0 && !colFilters['AM'].includes(itemStatus)) return false;
+
+        return true;
+      });
+
+      // If no items in this order match the current tab/filter, skip this order
+      if (relevantItems.length === 0) return;
+
+      // Header-level Column Filters (A, B, C, M to T, W to AQ)
+      for (const [colKey, selectedVals] of Object.entries(colFilters)) {
+        if (!selectedVals || selectedVals.length === 0) continue;
+        if (colKey === 'A' && !selectedVals.includes(order.timestamp || '')) return;
+        if (colKey === 'B' && !selectedVals.includes(order.customerName || '')) return;
+        if (colKey === 'C' && !selectedVals.includes(order.orderDate || '')) return;
+        if (colKey === 'M' && !selectedVals.includes(order.remark || '')) return;
+        if (colKey === 'N' && !selectedVals.includes(order.customerNumber || '')) return;
+        if (colKey === 'O' && !selectedVals.includes(order.billingAddress || '')) return;
+        if (colKey === 'P' && !selectedVals.includes(order.deliveryAddress || '')) return;
+        if (colKey === 'Q' && !selectedVals.includes(order.salesPerson || '')) return;
+        if (colKey === 'R' && !selectedVals.includes(order.salesPersonContact || '')) return;
+        if (colKey === 'S' && !selectedVals.includes(order.orderNo || 'Set SO#')) return;
+        if (colKey === 'T' && !selectedVals.includes(order.customerMailId || order.customerEmail || '')) return;
+        if (colKey === 'W' && !selectedVals.includes(colWStatuses[order.orderKey] ?? (order.accountStatus || 'In Production'))) return;
+        if (colKey === 'X' && !selectedVals.includes(colXRemarks[order.orderKey] ?? '')) return;
+        if (colKey === 'Y' && !selectedVals.includes(order.approvalStatus || 'APPROVED')) return;
+        if (colKey === 'AC' && !selectedVals.includes(acStatuses[order.orderKey] || 'Pending')) return;
+        if (colKey === 'AE' && !selectedVals.includes(colAEChecks[order.orderKey] ? 'Checked' : 'Unchecked')) return;
+        if (colKey === 'AF' && !selectedVals.includes(colAFTimestamps[order.orderKey] || '—')) return;
+        if (colKey === 'AG' && !selectedVals.includes(colAGRemarks[order.orderKey] || '')) return;
+        if (colKey === 'AH' && !selectedVals.includes(colAHChecks[order.orderKey] ? 'Checked' : 'Unchecked')) return;
+        if (colKey === 'AI' && !selectedVals.includes(colAITimestamps[order.orderKey] || '—')) return;
+        if (colKey === 'AJ' && !selectedVals.includes(colAJRemarks[order.orderKey] || '')) return;
+        if (colKey === 'AK' && !selectedVals.includes(order.transporterName || 'Atc express')) return;
+        if (colKey === 'AL' && !selectedVals.includes(lrNumbers[order.orderKey] || '')) return;
+        if (colKey === 'AN' && !selectedVals.includes(anStatuses[order.orderKey] || 'Pending')) return;
+        if (colKey === 'AP' && !selectedVals.includes(order.customerMailId || order.customerEmail || '')) return;
+      }
+
+      // Global Search term
+      if (searchTerm) {
+        const q = searchTerm.toLowerCase();
+        const matchesPO = (order.customerPO || '').toLowerCase().includes(q);
+        const matchesName = (order.customerName || '').toLowerCase().includes(q);
+        const matchesOrderNo = (order.orderNo || '').toLowerCase().includes(q);
+        const matchesSales = (order.salesPerson || '').toLowerCase().includes(q);
+        const matchesTransporter = (order.transporterName || '').toLowerCase().includes(q);
+        const matchesAnyItem = relevantItems.some(
+          it => (it.itemName || '').toLowerCase().includes(q) || (it.color || '').toLowerCase().includes(q)
+        );
+        if (!matchesPO && !matchesName && !matchesOrderNo && !matchesSales && !matchesTransporter && !matchesAnyItem) {
+          return;
+        }
+      }
+
+      result.push({
+        ...order,
+        items: relevantItems
+      });
+    });
+
+    // Sorting
+    if (sortConfig) {
+      result.sort((a, b) => {
+        let valA: any = '';
+        let valB: any = '';
+
+        if (sortConfig.column === 'B') {
+          valA = a.customerPO;
+          valB = b.customerPO;
+        } else if (sortConfig.column === 'C') {
+          valA = a.customerName;
+          valB = b.customerName;
+        } else if (sortConfig.column === 'K') {
+          valA = a.items.reduce((s, it) => s + it.qty, 0);
+          valB = b.items.reduce((s, it) => s + it.qty, 0);
+        } else {
+          valA = a.customerPO;
+          valB = b.customerPO;
+        }
+
+        if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+
+    return result;
+  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, colFilters, sortConfig, aeStatuses, aoStatuses]);
+
+  // Virtual Pagination for Product Automation & Closed Orders to prevent browser crash/freeze
+  const [automationPage, setAutomationPage] = useState(1);
+  const [automationPageSize, setAutomationPageSize] = useState<number>(25);
+
+  const totalAutomationPages = Math.max(1, Math.ceil(filteredOrders.length / (automationPageSize || 25)));
+  const safeAutomationPage = Math.min(automationPage, totalAutomationPages);
+
+  const paginatedOrders = useMemo(() => {
+    if (automationPageSize === 0) return filteredOrders;
+    const start = (safeAutomationPage - 1) * automationPageSize;
+    return filteredOrders.slice(start, start + automationPageSize);
+  }, [filteredOrders, safeAutomationPage, automationPageSize]);
+
+  const startRowNumber = useMemo(() => {
+    if (automationPageSize === 0 || safeAutomationPage <= 1) return 2;
+    let count = 2;
+    const prev = filteredOrders.slice(0, (safeAutomationPage - 1) * automationPageSize);
+    prev.forEach(o => { count += o.items.length; });
+    return count;
+  }, [filteredOrders, safeAutomationPage, automationPageSize]);
+
+  // Aggregate metrics
+  const totalOrdersCount = groupedOrders.length;
+  const pendingOnCount = rawResponses.filter(r => !r.orderNo || r.orderNo.trim() === '').length;
+  const activeItemsCount = rawResponses.filter(r => !isItemComplete(r.statusAN)).length;
+  const closedItemsCount = rawResponses.filter(r => isItemComplete(r.statusAN)).length;
+
+  const closedOrdersCount = groupedOrders.filter(o => isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN))).length;
+  const activeOrdersCount = groupedOrders.filter(o => o.orderNo && o.orderNo.trim() !== '' && !(isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN)))).length;
+  const totalItemRows = filteredOrders.reduce((sum, ord) => sum + ord.items.length, 0);
+  const totalOrderQty = filteredOrders.reduce((sum, ord) => sum + ord.items.reduce((s, it) => s + it.qty, 0), 0);
+  const totalDispatched = filteredOrders.reduce((sum, ord) => sum + ord.items.reduce((s, it) => s + (it.dispatchQty || 0), 0), 0);
+  const totalBalance = totalOrderQty - totalDispatched;
+
+  // Toggle filter value for a column
+  const toggleColFilterValue = (col: string, val: string) => {
+    setColFilters(prev => {
+      const current = prev[col] || [];
+      if (current.includes(val)) {
+        const next = current.filter(v => v !== val);
+        if (next.length === 0) {
+          const copy = { ...prev };
+          delete copy[col];
+          return copy;
+        }
+        return { ...prev, [col]: next };
+      } else {
+        return { ...prev, [col]: [...current, val] };
+      }
+    });
+  };
+
+  // Get unique values for ANY column to show in filter dropdown
+  const getUniqueColumnValues = (col: string): string[] => {
+    const set = new Set<string>();
+    groupedOrders.forEach(o => {
+      if (col === 'A') set.add(o.timestamp || '');
+      else if (col === 'B') set.add(o.customerName || '');
+      else if (col === 'C') set.add(o.orderDate || '');
+      else if (col === 'D') o.items.forEach(it => set.add(it.unit || ''));
+      else if (col === 'E') o.items.forEach(it => set.add(it.itemName || ''));
+      else if (col === 'F') o.items.forEach(it => set.add(it.color || ''));
+      else if (col === 'G') o.items.forEach(it => set.add(it.width || ''));
+      else if (col === 'H') o.items.forEach(it => set.add(it.unitOfItem || ''));
+      else if (col === 'I') o.items.forEach(it => set.add(String(it.qty || '')));
+      else if (col === 'J') o.items.forEach(it => set.add(String(it.rate || '')));
+      else if (col === 'K') o.items.forEach(it => set.add(String(it.discount || '')));
+      else if (col === 'L') o.items.forEach(it => set.add(it.deliveryDate || ''));
+      else if (col === 'M') set.add(o.remark || '');
+      else if (col === 'N') set.add(o.customerNumber || '');
+      else if (col === 'O') set.add(o.billingAddress || '');
+      else if (col === 'P') set.add(o.deliveryAddress || '');
+      else if (col === 'Q') set.add(o.salesPerson || '');
+      else if (col === 'R') set.add(o.salesPersonContact || '');
+      else if (col === 'S') set.add(o.orderNo || 'Set SO#');
+      else if (col === 'T') set.add(o.customerMailId || o.customerEmail || '');
+      else if (col === 'U') o.items.forEach(it => set.add(String(it.dispatchQty ?? 0)));
+      else if (col === 'V') o.items.forEach(it => set.add(String(it.balanceQty ?? '')));
+      else if (col === 'W') set.add(colWStatuses[o.orderKey] ?? (o.accountStatus || 'In Production'));
+      else if (col === 'X') set.add(colXRemarks[o.orderKey] ?? '');
+      else if (col === 'Y') set.add(o.approvalStatus || 'APPROVED');
+      else if (col === 'Z') set.add(o.orderNoTimestamp || o.timestamp || '');
+      else if (col === 'AA') set.add('Sent');
+      else if (col === 'AB') set.add('Delivered');
+      else if (col === 'AC') set.add(acStatuses[o.orderKey] || 'Pending');
+      else if (col === 'AE') set.add(colAEChecks[o.orderKey] ? 'Checked' : 'Unchecked');
+      else if (col === 'AF') set.add(colAFTimestamps[o.orderKey] || '—');
+      else if (col === 'AG') set.add(colAGRemarks[o.orderKey] || '');
+      else if (col === 'AH') set.add(colAHChecks[o.orderKey] ? 'Checked' : 'Unchecked');
+      else if (col === 'AI') set.add(colAITimestamps[o.orderKey] || '—');
+      else if (col === 'AJ') set.add(colAJRemarks[o.orderKey] || '');
+      else if (col === 'AK') set.add(o.transporterName || 'Atc express');
+      else if (col === 'AL') set.add(lrNumbers[o.orderKey] || '');
+      else if (col === 'AM') o.items.forEach(it => set.add(isItemComplete(it.statusAN) ? 'Complete' : (it.statusAN || 'Open')));
+      else if (col === 'AN') set.add(anStatuses[o.orderKey] || 'Pending');
+      else if (col === 'AP') set.add(o.customerMailId || o.customerEmail || '');
+    });
+    return Array.from(set).filter(v => v !== undefined && v !== null && String(v).trim() !== '').slice(0, 50);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* SPREADSHEET TOOLBAR & CONTROLS */}
+      <div className="bg-white rounded-xl border border-slate-300 shadow-xs overflow-hidden">
+        {/* Top Control Bar - ALL IN ONE SINGLE LINE */}
+        <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 overflow-x-auto select-none scrollbar-none whitespace-nowrap">
+          {/* Left Controls Group in Single Line */}
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Search Box */}
+            <div className="relative w-48 sm:w-56 shrink-0">
+              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                placeholder="Search PO, Customer, Item, Order No..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-7 pr-6 py-1 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 placeholder-slate-400"
+              />
+              {searchTerm && (
+                <button
+                  onClick={() => setSearchTerm('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            {/* Quick Status Filter */}
+            <div className="flex items-center gap-1 text-xs shrink-0">
+              <span className="text-slate-500 font-medium text-[11px] flex items-center gap-0.5">
+                <Filter className="w-3 h-3" />
+                Status:
+              </span>
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as any)}
+                className="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+              >
+                <option value="ALL">All Statuses ({totalOrdersCount})</option>
+                <option value="Open">🔵 Open Only ({groupedOrders.filter(o => !isItemComplete(o.statusAN) && o.statusAN !== 'In-Progress').length})</option>
+                <option value="In-Progress">🟡 In-Progress Only ({groupedOrders.filter(o => o.statusAN === 'In-Progress').length})</option>
+                <option value="Complete">🟢 Complete Only ({closedOrdersCount})</option>
+              </select>
+            </div>
+
+            {/* ONLY Order Status Badge */}
+            <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-sky-50 border border-sky-200 text-sky-950 text-xs shadow-2xs shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>
+              <span className="text-[11px] font-bold text-sky-800">Order Status :</span>
+              <span className="font-mono font-bold text-xs">{activeOrdersCount} Open / {closedOrdersCount} Complete</span>
+            </div>
+
+            {/* Clear active filters button */}
+            {Object.keys(colFilters).length > 0 && (
+              <button
+                onClick={() => setColFilters({})}
+                className="px-1.5 py-1 text-[11px] font-semibold text-rose-700 bg-rose-50 border border-rose-200 rounded hover:bg-rose-100 flex items-center gap-1 shrink-0"
+              >
+                <X className="w-3 h-3" />
+                <span>Reset ({Object.keys(colFilters).length})</span>
+              </button>
+            )}
+          </div>
+
+          <div className="h-4 w-px bg-slate-300 shrink-0 mx-0.5" />
+
+          {/* Right Controls Group in Single Line */}
+          <div className="flex items-center gap-1.5 shrink-0">
+            {/* View Mode Switch */}
+            <div className="flex items-center p-0.5 bg-slate-200/80 rounded-lg text-xs shrink-0">
+              <button
+                onClick={() => setViewMode('merged')}
+                className={`px-2 py-1 rounded-md transition-all font-semibold ${
+                  viewMode === 'merged'
+                    ? 'bg-white text-emerald-800 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="A-E & N-X Vertically Merged with Individual Product Item Rows"
+              >
+                ⚡ Merged Visual View
+              </button>
+              <button
+                onClick={() => setViewMode('unmerged')}
+                className={`px-2 py-1 rounded-md transition-all font-medium ${
+                  viewMode === 'unmerged'
+                    ? 'bg-white text-slate-900 shadow-xs font-semibold'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+                title="100% Flat Row-Wise View (Independent Row Data)"
+              >
+                Flat Unmerged
+              </button>
+            </div>
+
+            {/* FREEZE PANES BUTTON - 1-CLICK TOGGLE TO UNFREEZE AND BACK */}
+
+
+            {/* Columns Hide / Show Button */}
+            <button
+              onClick={() => setShowColManager(true)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg shadow-2xs transition-colors shrink-0"
+              title="Hide / Show Specific Columns"
+            >
+              <Columns className="w-3 h-3 text-emerald-700" />
+              <span>Columns ({Object.values(visibleCols).filter(Boolean).length}/45)</span>
+            </button>
+
+            {/* Export CSV */}
+            <button
+              onClick={handleExportCSV}
+              className="p-1 text-slate-600 hover:text-slate-900 hover:bg-slate-200 rounded border border-slate-300 shrink-0"
+              title="Export CSV / Excel"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+
+            {/* Firebase Cloud Sync Button */}
+            <button
+              onClick={() => setShowFirebaseModal(true)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white rounded-lg shadow-2xs transition-colors shrink-0"
+              title="Upload historical data to Firebase"
+            >
+              <Flame className="w-3 h-3 fill-white" />
+              <span>Firebase</span>
+            </button>
+
+            {/* Reset data */}
+            <button
+              onClick={handleReset}
+              className="p-1 text-slate-500 hover:text-slate-700 hover:bg-slate-200 rounded shrink-0"
+              title="Reset to default sample data"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+
+            {/* FULL SIZE ON BUTTON IN THE FAR RIGHT CORNER */}
+            {setIsFullWidth && (
+              <button
+                onClick={() => setIsFullWidth(!isFullWidth)}
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-bold transition-all shadow-xs shrink-0 ${
+                  isFullWidth
+                    ? 'bg-emerald-700 text-white border-emerald-800 hover:bg-emerald-800'
+                    : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-100'
+                }`}
+                title={isFullWidth ? "Click for Boxed View" : "Click for Full Screen View"}
+              >
+                {isFullWidth ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+                <span>{isFullWidth ? 'Full Size ON' : 'Full Size OFF'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Sync feedback notification */}
+        {syncFeedback && (
+          <div className="p-2.5 bg-emerald-50 border-b border-emerald-200 flex items-center justify-between text-xs text-emerald-900 animate-in fade-in duration-150">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span className="font-medium">{syncFeedback}</span>
+            </div>
+            <span className="text-[11px] text-emerald-700 font-mono">Saved in Browser LocalStorage ✓</span>
+          </div>
+        )}
+
+        {/* THE MAIN SPREADSHEET TABLE GRID CONTAINER (Vertical & Horizontal Scroll Box with Freeze Panes) */}
+        {activeSheetTab === 'product_order' ? (
+          <ProductOrderView
+            orders={rawResponses}
+            searchTerm={searchTerm}
+            setSearchTerm={setSearchTerm}
+            isFullWidth={isFullWidth}
+            onGenerateOrderNo={handleGenerateOrderNo}
+            onGenerateAllPending={handleGenerateAllPendingOrderNo}
+            onDeleteRow={handleDeleteItem}
+            onClearAllRows={handleClearAllProductOrders}
+            onOpenImportModal={() => {
+              setImportTabName('Product Order');
+              setShowImportModal(true);
+            }}
+            onUpdateRow={handleUpdateProductOrderRow}
+            onNavigateToAutomation={() => setActiveSheetTab('automation')}
+            onAddNewRow={handleAddNewProductOrderRow}
+            onFetchQueryLive={handleSyncGoogleQueryLive}
+            isFetchingLive={isFetchingQueryLive}
+            onOpenQueryStudio={onOpenQueryStudio}
+            onPurgeDelhiAndLock={handlePurgeDelhiAndLockQuery}
+          />
+        ) : (
+          <div className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-140px)] max-h-[89vh]' : 'h-[640px] max-h-[74vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}>
+            <table className="w-full border-collapse text-xs text-left">
+            {/* The Sticky Column Letters Header with Rich Fill Colors */}
+            <thead className={`${freezeRows === 1 ? 'sticky top-0 z-30' : ''} select-none border-b-2 border-slate-900`}>
+              <tr className="font-mono text-[11px]">
+                {/* # Column */}
+                <th
+                  className={`w-12 px-2 py-1 text-center bg-slate-900 text-slate-300 border-r border-slate-800 font-bold ${
+                    freezeColumns >= 1 ? 'sticky left-0 z-40 bg-slate-900 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]' : ''
+                  }`}
+                >
+                  #
+                </th>
+                {/* Action Column */}
+                <th className="w-14 px-2 py-1 text-center bg-slate-900 text-slate-300 border-r border-slate-800 font-bold">
+                  Action
+                </th>
+
+                {fmsColumnMapping.map(col => {
+                  if (!visibleCols[col.sheetCol]) return null;
+                  const isFiltered = colFilters[col.sheetCol] && colFilters[col.sheetCol].length > 0;
+                  const isSorted = sortConfig && sortConfig.column === col.sheetCol;
+
+                  let bgColor = 'bg-slate-900 text-slate-300 border-r border-slate-800';
+                  if (['A', 'B', 'C', 'D', 'E'].includes(col.sheetCol)) {
+                    bgColor = 'bg-sky-950 text-sky-200 border-r border-sky-900';
+                  } else if (['F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N'].includes(col.sheetCol)) {
+                    bgColor = 'bg-slate-950 text-slate-200 border-r border-slate-800';
+                  } else if (['O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X'].includes(col.sheetCol)) {
+                    bgColor = 'bg-indigo-950 text-indigo-200 border-r border-indigo-900';
+                  } else if (col.sheetCol === 'Y') {
+                    bgColor = 'bg-amber-900 text-amber-100 border-r border-amber-800 font-extrabold';
+                  } else if (col.sheetCol === 'Z') {
+                    bgColor = 'bg-emerald-900 text-emerald-100 border-r border-emerald-800 font-extrabold';
+                  } else if (['AA', 'AB'].includes(col.sheetCol)) {
+                    bgColor = 'bg-teal-950 text-teal-200 border-r border-teal-900 font-bold';
+                  } else if (['AG', 'AH', 'AI'].includes(col.sheetCol)) {
+                    bgColor = 'bg-emerald-950 text-emerald-200 border-r border-emerald-900 font-bold';
+                  } else if (['AJ', 'AK', 'AL'].includes(col.sheetCol)) {
+                    bgColor = 'bg-sky-950 text-sky-200 border-r border-sky-900 font-bold';
+                  } else if (col.sheetCol === 'AN') {
+                    bgColor = 'bg-blue-900 text-blue-100 border-r border-blue-800 font-extrabold';
+                  } else if (col.sheetCol === 'AO' || col.sheetCol === 'AP') {
+                    bgColor = 'bg-purple-950 text-purple-200 border-r border-purple-900';
+                  }
+
+                  // Sticky freeze column styles
+                  let stickyStyle = '';
+                  if (col.sheetCol === 'B' && freezeColumns >= 2) {
+                    stickyStyle = 'sticky left-[48px] z-40 bg-sky-950 text-sky-100 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
+                  } else if (col.sheetCol === 'C' && freezeColumns >= 3) {
+                    stickyStyle = 'sticky left-[158px] z-40 bg-sky-950 text-sky-100 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
+                  }
+
+                  return (
+                    <th
+                      key={col.sheetCol}
+                      className={`px-2 py-1 text-center font-bold ${bgColor} ${stickyStyle}`}
+                    >
+                      <div className="flex items-center justify-center gap-1">
+                        <span>{col.sheetCol}</span>
+                        {isSorted && (
+                          <span className="text-[10px] text-emerald-400 font-bold">
+                            {sortConfig.direction === 'asc' ? '↑' : '↓'}
+                          </span>
+                        )}
+                        {isFiltered && (
+                          <span className="w-1.5 h-1.5 rounded-full bg-rose-400"></span>
+                        )}
+                      </div>
+                    </th>
+                  );
+                })}
+              </tr>
+
+              {/* Row 2: Human Readable Column Names with Filters & Elegant Fill Color */}
+              <tr className="bg-slate-800 text-slate-100 font-sans text-[11px] font-semibold border-b-2 border-slate-950">
+                <th
+                  className={`px-2 py-1 text-center bg-slate-900 text-slate-400 border-r border-slate-700 ${
+                    freezeColumns >= 1 ? 'sticky left-0 z-40 bg-slate-900 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]' : ''
+                  }`}
+                >
+                  1
+                </th>
+                <th className="px-2 py-1 text-center bg-slate-900 text-slate-400 border-r border-slate-700 text-[10px]">
+                  Action
+                </th>
+
+                {fmsColumnMapping.map(col => {
+                  if (!visibleCols[col.sheetCol]) return null;
+                  const isFiltered = colFilters[col.sheetCol] && colFilters[col.sheetCol].length > 0;
+
+                  // Rich fill color for specific functional groups
+                  let bgHead = 'bg-slate-800 text-slate-100 border-r border-slate-700';
+                  if (col.sheetCol === 'Y') {
+                    bgHead = 'bg-amber-950 text-amber-200 border-r border-amber-800 font-bold';
+                  } else if (col.sheetCol === 'Z') {
+                    bgHead = 'bg-emerald-950 text-emerald-200 border-r border-emerald-800 font-bold';
+                  } else if (['AA', 'AB'].includes(col.sheetCol)) {
+                    bgHead = 'bg-teal-900 text-teal-100 border-r border-teal-800 font-bold min-w-[120px]';
+                  } else if (['AG', 'AH', 'AI'].includes(col.sheetCol)) {
+                    bgHead = 'bg-emerald-900 text-emerald-100 border-r border-emerald-800 font-bold min-w-[120px]';
+                  } else if (['AJ', 'AK', 'AL'].includes(col.sheetCol)) {
+                    bgHead = 'bg-sky-900 text-sky-100 border-r border-sky-800 font-bold min-w-[120px]';
+                  } else if (col.sheetCol === 'AN') {
+                    bgHead = 'bg-blue-950 text-sky-200 border-r border-blue-800 min-w-[140px] font-bold';
+                  } else if (['A', 'B', 'C', 'D', 'E'].includes(col.sheetCol)) {
+                    bgHead = 'bg-slate-850 text-sky-100 border-r border-slate-700';
+                  }
+
+                  // Sticky freeze column styles
+                  let stickyStyle = '';
+                  if (col.sheetCol === 'B' && freezeColumns >= 2) {
+                    stickyStyle = 'sticky left-[48px] z-40 bg-slate-850 text-sky-200 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
+                  } else if (col.sheetCol === 'C' && freezeColumns >= 3) {
+                    stickyStyle = 'sticky left-[158px] z-40 bg-slate-850 text-sky-200 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
+                  }
+
+                  return (
+                    <th
+                      key={col.sheetCol}
+                      className={`px-2 py-1 whitespace-nowrap ${bgHead} ${stickyStyle}`}
+                    >
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span className="truncate">{col.name}</span>
+                        {/* Filter on EVERY column */}
+                        <button
+                          onClick={() => setActiveFilterCol(activeFilterCol === col.sheetCol ? null : col.sheetCol)}
+                          className={`p-0.5 rounded hover:bg-slate-700 transition-colors ${
+                            isFiltered ? 'text-rose-400 font-extrabold bg-rose-950' : 'text-slate-400 hover:text-white'
+                          }`}
+                          title={`Filter, Sort or Hide ${col.name} (${col.sheetCol})`}
+                        >
+                          <Filter className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </th>
+                  );
+                })}
+              </tr>
+            </thead>
+
+            {/* Table Body */}
+            <tbody className="font-sans">
+              {filteredOrders.length === 0 ? (
+                <tr>
+                  <td colSpan={45} className="text-center py-12 text-slate-500 bg-white">
+                    <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                    <p className="font-semibold text-slate-700">No orders match the current filter or search criteria.</p>
+                    <p className="text-xs text-slate-400 mt-1">Try switching tabs below, reset column filters or clear search.</p>
+                  </td>
+                </tr>
+              ) : (
+                renderSpreadsheetRows(
+                  paginatedOrders,
+                  viewMode === 'merged',
+                  visibleCols,
+                  freezeColumns,
+                  {
+                    onDispatchChange: handleDispatchChange,
+                    onItemStatusChange: handleItemStatusChange,
+                    onDeleteOrder: handleDeleteOrder,
+                    onDeleteItem: handleDeleteItem,
+                    onOpenOrderNoModal: setEditingOrderNo,
+                    onOpenAddItemModal: setAddingItemToOrder,
+                    onOpenConfirmWhatsAppModal: setConfirmWhatsAppModalOrder,
+                    onOpenWhatsAppModal: setWhatsAppModalOrder,
+                    acStatuses,
+                    setAcStatuses,
+                    anStatuses,
+                    setAnStatuses,
+                    lrNumbers,
+                    setLrNumbers,
+                    setSyncFeedback,
+                    colWStatuses,
+                    onUpdateColW: handleUpdateColW,
+                    colXRemarks,
+                    onUpdateColX: handleUpdateColX,
+                    colAEChecks,
+                    onToggleColAE: handleToggleColAE,
+                    colAFTimestamps,
+                    colAGRemarks,
+                    onUpdateColAG: handleUpdateColAG,
+                    colAHChecks,
+                    onToggleColAH: handleToggleColAH,
+                    colAITimestamps,
+                    colAJRemarks,
+                    onUpdateColAJ: handleUpdateColAJ
+                  },
+                  startRowNumber
+                )
+              )}
+            </tbody>
+          </table>
+        </div>
+        )}
+
+        {/* FAST VIRTUAL PAGINATION BAR */}
+        {(activeSheetTab === 'automation' || activeSheetTab === 'closed') && filteredOrders.length > 0 && (
+          <div className="shrink-0 flex items-center justify-between px-2.5 py-1 bg-slate-100 border-t border-slate-300 text-xs text-slate-700 select-none">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-slate-800 text-[11px]">
+                Showing {automationPageSize === 0 ? 1 : (safeAutomationPage - 1) * automationPageSize + 1}–
+                {automationPageSize === 0 ? filteredOrders.length : Math.min(safeAutomationPage * automationPageSize, filteredOrders.length)} of{' '}
+                <span className="font-bold text-emerald-700">{filteredOrders.length}</span> orders
+              </span>
+
+              <div className="flex items-center gap-1 ml-2 pl-2 border-l border-slate-300">
+                <span className="text-[10px] text-slate-500">Per page:</span>
+                <select
+                  value={automationPageSize}
+                  onChange={(e) => {
+                    setAutomationPageSize(Number(e.target.value));
+                    setAutomationPage(1);
+                  }}
+                  className="px-1.5 py-0.5 bg-white border border-slate-300 rounded text-[11px] font-semibold text-slate-700 focus:outline-none focus:ring-1 focus:ring-emerald-500 cursor-pointer"
+                >
+                  <option value={20}>20</option>
+                  <option value={25}>25</option>
+                  <option value={50}>50</option>
+                  <option value={100}>100</option>
+                  <option value={0}>All</option>
+                </select>
+              </div>
+            </div>
+
+            {automationPageSize > 0 && totalAutomationPages > 1 && (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => setAutomationPage(p => Math.max(1, p - 1))}
+                  disabled={safeAutomationPage <= 1}
+                  className="px-2 py-0.5 rounded bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-0.5 text-[11px] font-medium cursor-pointer"
+                >
+                  <ChevronLeft className="w-3 h-3" /> Prev
+                </button>
+
+                <span className="px-1 text-[11px] font-medium text-slate-600">
+                  <strong className="text-slate-900">{safeAutomationPage}</strong>/{totalAutomationPages}
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => setAutomationPage(p => Math.min(totalAutomationPages, p + 1))}
+                  disabled={safeAutomationPage >= totalAutomationPages}
+                  className="px-2 py-0.5 rounded bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-0.5 text-[11px] font-medium cursor-pointer"
+                >
+                  Next <ChevronRight className="w-3 h-3" />
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* COLUMN HEADER FILTER POPOVER (Works on EVERY Column with HIDE THIS COLUMN Option) */}
+        {activeFilterCol && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/20" onClick={() => setActiveFilterCol(null)}>
+            <div
+              className="bg-white rounded-xl shadow-2xl border border-slate-300 p-4 w-72 text-xs space-y-3 animate-in fade-in zoom-in-95 duration-150"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between pb-2 border-b border-slate-200">
+                <span className="font-bold text-slate-900 flex items-center gap-1.5">
+                  <Filter className="w-3.5 h-3.5 text-emerald-600" />
+                  {fmsColumnMapping.find(c => c.sheetCol === activeFilterCol)?.name} ({activeFilterCol})
+                </span>
+                <button onClick={() => setActiveFilterCol(null)} className="text-slate-400 hover:text-slate-600">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Sorting options */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    setSortConfig({ column: activeFilterCol, direction: 'asc' });
+                    setActiveFilterCol(null);
+                  }}
+                  className="flex-1 py-1.5 px-2 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700 flex items-center justify-center gap-1"
+                >
+                  <ArrowUp className="w-3 h-3 text-emerald-600" />
+                  <span>Sort A → Z</span>
+                </button>
+                <button
+                  onClick={() => {
+                    setSortConfig({ column: activeFilterCol, direction: 'desc' });
+                    setActiveFilterCol(null);
+                  }}
+                  className="flex-1 py-1.5 px-2 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700 flex items-center justify-center gap-1"
+                >
+                  <ArrowDown className="w-3 h-3 text-emerald-600" />
+                  <span>Sort Z → A</span>
+                </button>
+              </div>
+
+              {/* HIDE THIS COLUMN OPTION (Requested by user) */}
+              <button
+                onClick={() => {
+                  setVisibleCols(prev => ({ ...prev, [activeFilterCol]: false }));
+                  setActiveFilterCol(null);
+                  setSyncFeedback(`Column ${activeFilterCol} hidden. Use 'Columns' button to unhide.`);
+                  setTimeout(() => setSyncFeedback(null), 3000);
+                }}
+                className="w-full py-1.5 px-2 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded font-semibold flex items-center justify-center gap-1.5 border border-rose-200"
+              >
+                <EyeOff className="w-3.5 h-3.5" />
+                <span>Hide this Column ({activeFilterCol})</span>
+              </button>
+
+              {/* Unique values list with checkboxes */}
+              <div>
+                <span className="text-[11px] font-semibold text-slate-600 block mb-1">Select values to filter:</span>
+                <div className="max-h-44 overflow-y-auto space-y-1 bg-slate-50 p-2 rounded border border-slate-200">
+                  {getUniqueColumnValues(activeFilterCol).map(val => {
+                    const isChecked = !colFilters[activeFilterCol] || colFilters[activeFilterCol].includes(val);
+                    return (
+                      <label key={val} className="flex items-center gap-2 py-0.5 px-1 hover:bg-white rounded cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={() => toggleColFilterValue(activeFilterCol, val)}
+                          className="rounded text-emerald-600 focus:ring-emerald-500"
+                        />
+                        <span className="truncate text-slate-800">{val}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-200 flex items-center justify-between">
+                <button
+                  onClick={() => {
+                    setColFilters(prev => {
+                      const copy = { ...prev };
+                      delete copy[activeFilterCol];
+                      return copy;
+                    });
+                    setActiveFilterCol(null);
+                  }}
+                  className="text-slate-500 hover:text-slate-800 text-[11px] underline"
+                >
+                  Clear Filter
+                </button>
+                <button
+                  onClick={() => setActiveFilterCol(null)}
+                  className="px-3 py-1 bg-emerald-700 text-white rounded font-medium hover:bg-emerald-800"
+                >
+                  Apply
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* GOOGLE SHEETS BOTTOM TABS BAR */}
+        <div className="bg-slate-200 border-t border-slate-300 px-2 py-0.5 flex items-center justify-between gap-2 select-none">
+          {/* Tabs: Product Order, Product Automation, Closed Orders */}
+          <div className="flex items-center gap-1">
+            {/* Tab 1: Product Order */}
+            <button
+              onClick={() => setActiveSheetTab('product_order')}
+              className={`px-3 py-1 text-xs font-bold rounded-t-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                activeSheetTab === 'product_order'
+                  ? 'bg-white text-blue-900 shadow-xs border-t-2 border-blue-600'
+                  : 'bg-slate-300/80 text-slate-700 hover:bg-slate-300'
+              }`}
+            >
+              <FileSpreadsheet className="w-3.5 h-3.5 text-blue-600" />
+              <span>Product Order</span>
+            </button>
+
+            {/* Tab 2: Product Automation */}
+            <button
+              onClick={() => setActiveSheetTab('automation')}
+              className={`px-3 py-1 text-xs font-bold rounded-t-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                activeSheetTab === 'automation'
+                  ? 'bg-white text-emerald-800 shadow-xs border-t-2 border-emerald-600'
+                  : 'bg-slate-300/80 text-slate-700 hover:bg-slate-300'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Product Automation</span>
+            </button>
+
+            {/* Tab 3: Closed Orders */}
+            <button
+              onClick={() => setActiveSheetTab('closed')}
+              className={`px-3 py-1 text-xs font-bold rounded-t-md transition-colors flex items-center gap-1.5 cursor-pointer ${
+                activeSheetTab === 'closed'
+                  ? 'bg-white text-indigo-900 shadow-xs border-t-2 border-indigo-600'
+                  : 'bg-slate-300/80 text-slate-700 hover:bg-slate-300'
+              }`}
+            >
+              <Archive className="w-3.5 h-3.5 text-indigo-600" />
+              <span>Closed Orders</span>
+            </button>
+
+            <button
+              onClick={() => setShowNewOrderModal(true)}
+              className="p-1 text-slate-600 hover:text-emerald-700 hover:bg-slate-300 rounded transition-colors"
+              title="Add New Order Sheet Row"
+            >
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Status info - compact */}
+          <div className="text-[10px] text-slate-600 flex items-center gap-1.5 shrink-0">
+            <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span>Live Web Sheet Workspace</span>
+          </div>
+        </div>
+      </div>
+
+      {/* MODAL: DIRECT GOOGLE SHEET (ID + TAB) & EXCEL / CSV DATA IMPORT */}
+      {showImportModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full border border-slate-200 overflow-hidden my-6">
+            {/* Modal Header */}
+            <div className="px-6 py-4 bg-gradient-to-r from-slate-900 via-slate-800 to-blue-950 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-sm sm:text-base flex items-center gap-2">
+                  <Upload className="w-4 h-4 text-sky-400" />
+                  Import Google Sheet / Excel Data &amp; Sync to Firebase
+                </h3>
+                <p className="text-[11px] text-slate-300">
+                  Google Sheet ID aur Tab Name enter karke live data load karein ya direct paste karein
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setShowImportModal(false);
+                  setImportError(null);
+                }}
+                className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-white/10"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Mode Tabs */}
+            <div className="flex items-center border-b border-slate-200 bg-slate-50 px-6 pt-3 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setImportTabMode('sheet');
+                  setImportError(null);
+                }}
+                className={`pb-2.5 px-3 text-xs font-bold transition-all border-b-2 flex items-center gap-1.5 ${
+                  importTabMode === 'sheet'
+                    ? 'border-blue-600 text-blue-900 bg-white rounded-t-lg shadow-2xs'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-blue-600" />
+                <span>⚡ Live Google Sheet (ID + Tab)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setImportTabMode('paste');
+                  setImportError(null);
+                }}
+                className={`pb-2.5 px-3 text-xs font-bold transition-all border-b-2 flex items-center gap-1.5 ${
+                  importTabMode === 'paste'
+                    ? 'border-emerald-600 text-emerald-900 bg-white rounded-t-lg shadow-2xs'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Copy className="w-3.5 h-3.5 text-emerald-600" />
+                <span>📋 Paste Rows (Ctrl+V)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setImportTabMode('file');
+                  setImportError(null);
+                }}
+                className={`pb-2.5 px-3 text-xs font-bold transition-all border-b-2 flex items-center gap-1.5 ${
+                  importTabMode === 'file'
+                    ? 'border-indigo-600 text-indigo-900 bg-white rounded-t-lg shadow-2xs'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Upload className="w-3.5 h-3.5 text-indigo-600" />
+                <span>📁 Upload File (.csv)</span>
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-xs max-h-[75vh] overflow-y-auto">
+              {/* Error Callout */}
+              {importError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 flex items-start gap-2.5 animate-in fade-in">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <span className="font-bold block text-xs">Import Issue:</span>
+                    <p className="text-[11px] leading-relaxed text-rose-800">{importError}</p>
+                    <p className="text-[10px] text-rose-700 font-medium">
+                      💡 Tip: Agar Sheet internal/private ho, toh Google Sheet me jaakar rows select karke <strong>Ctrl+C</strong> karein aur yahan <strong>"Paste Rows (Ctrl+V)"</strong> tab me paste kar dein!
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 1: GOOGLE SHEET ID & TAB NAME */}
+              {importTabMode === 'sheet' && (
+                <div className="space-y-4">
+                  {/* Google Sheet ID input */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="text-[11px] font-bold text-slate-800 flex items-center gap-1">
+                        <Link2 className="w-3.5 h-3.5 text-blue-600" />
+                        Google Sheet ID ya Full Sheet URL:
+                      </label>
+                      <span className="text-[10px] text-slate-500">
+                        URL paste karne par ID auto-extract hoti hai
+                      </span>
+                    </div>
+                    <input
+                      type="text"
+                      value={importSheetId}
+                      onChange={(e) => {
+                        setImportSheetId(e.target.value);
+                        setImportError(null);
+                      }}
+                      placeholder="e.g. 14cIoLK1Z8Ihj1DakVtHvk-QPrCfJzQu2hco26MBHiYk"
+                      className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg font-mono focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    />
+                    <div className="mt-1 flex items-center justify-between text-[10px] text-slate-500">
+                      <span>
+                        Extracted ID:{' '}
+                        <code className="text-blue-800 font-bold font-mono">
+                          {extractSheetId(importSheetId) || 'None'}
+                        </code>
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setImportSheetId('1xSSZ6DyQarQJOd8UpOfCV-tjdKL1oQq_IKuXJkcRv5Q')
+                        }
+                        className="text-blue-600 hover:underline font-bold"
+                      >
+                        Reset Default ID
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Tab / Sheet Name input */}
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-800 block mb-1">
+                      Tab / Sheet Name (Google Sheet ke bottom tab ka naam):
+                    </label>
+                    <input
+                      type="text"
+                      value={importTabName}
+                      onChange={(e) => {
+                        setImportTabName(e.target.value);
+                        setImportError(null);
+                      }}
+                      placeholder="e.g. Product Order / Product Automation"
+                      className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg font-medium focus:ring-1 focus:ring-blue-500 focus:outline-none"
+                    />
+                    {/* Quick Selection Chips */}
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] text-slate-500 font-medium">Quick Pick:</span>
+                      <button
+                        type="button"
+                        onClick={() => setImportTabName('Product Order')}
+                        className={`px-2 py-0.5 rounded text-[11px] font-semibold border transition-colors ${
+                          importTabName === 'Product Order'
+                            ? 'bg-blue-100 border-blue-400 text-blue-900 font-bold'
+                            : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        Product Order (19 Columns A-S) ★
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setImportTabName('Product Automation')}
+                        className={`px-2 py-0.5 rounded text-[11px] font-semibold border transition-colors ${
+                          importTabName === 'Product Automation'
+                            ? 'bg-blue-100 border-blue-400 text-blue-900 font-bold'
+                            : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        Product Automation (43 Columns A-AQ)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setImportTabName('Closed Orders')}
+                        className={`px-2 py-0.5 rounded text-[11px] font-semibold border transition-colors ${
+                          importTabName === 'Closed Orders'
+                            ? 'bg-blue-100 border-blue-400 text-blue-900'
+                            : 'bg-slate-100 border-slate-200 text-slate-700 hover:bg-slate-200'
+                        }`}
+                      >
+                        Closed Orders
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Query Formula Info Box */}
+                  <div className="p-3 bg-blue-50/80 rounded-xl border border-blue-200 space-y-2">
+                    <div className="flex items-center justify-between text-blue-950 font-bold text-[11px]">
+                      <span>Google Sheet IMPORTRANGE Query Formula:</span>
+                      <span className="text-[10px] px-1.5 py-0.2 rounded bg-blue-200 text-blue-900 font-mono">1TksqSeCWat_0CRRPTxA0nAMiQFtUO17xUhtqHJM2JAs</span>
+                    </div>
+                    <code className="block bg-white p-2 rounded border border-blue-200 text-[10px] text-blue-900 font-mono leading-relaxed break-all select-all">
+                      =QUERY(IMPORTRANGE("1TksqSeCWat_0CRRPTxA0nAMiQFtUO17xUhtqHJM2JAs", "Orders!A:R"), "select Col1, Col2,Col8,Col9, Col10, Col11, Col12, Col13, Col14, Col15, Col16, Col17, Col18, Col3, Col4, Col5, Col6, Col7 ", 1)
+                    </code>
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <p className="text-[10px] text-blue-700 flex-1">
+                        Transposes 18 columns from Orders!A:R directly into Product Order (A:R) with Order Number in Col S.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          setShowImportModal(false);
+                          await handleSyncGoogleQueryLive();
+                        }}
+                        className="px-3 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-lg font-bold text-xs shadow-xs flex items-center gap-1.5 shrink-0 transition-colors cursor-pointer"
+                      >
+                        <Zap className="w-3.5 h-3.5" />
+                        <span>⚡ Load This Query (3,215 Rows)</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Firebase Auto-Sync Checkbox card */}
+                  <div className="p-3 bg-amber-50/70 rounded-xl border border-amber-200/90 space-y-2">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoSyncToFirebase}
+                        onChange={(e) => setAutoSyncToFirebase(e.target.checked)}
+                        className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                      />
+                      <span className="font-bold text-xs text-amber-950 flex items-center gap-1.5">
+                        <Flame className="w-3.5 h-3.5 fill-amber-600 text-amber-600" />
+                        Auto-save imported data to Firebase Realtime Database
+                      </span>
+                    </label>
+                    <div className="pl-6 text-[10px] text-amber-900/80 space-y-0.5">
+                      <p>
+                        Data import hote hi direct Firebase me batch update ho jayega taaki aapka data cloud me permanently save rahe aur har device par live show ho.
+                      </p>
+                      <p className="font-mono text-slate-600 truncate">
+                        Target: <span className="text-amber-800">{firebaseUrl}</span> (Auth Secret: Configured ✓)
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Guidance Note */}
+                  <div className="p-3 bg-sky-50 rounded-xl border border-sky-200 text-sky-950 text-[11px] leading-relaxed">
+                    <span className="font-bold block text-sky-900 mb-0.5">📌 Permission Note for Google Sheets:</span>
+                    Google Sheets se direct fetch karne ke liye Sheet ka link sharing <strong>"Anyone with the link can view"</strong> hona chahiye.
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 2: PASTE ROWS DIRECTLY */}
+              {importTabMode === 'paste' && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-700 block mb-1">
+                      Paste rows directly copied from Google Sheets / Excel (Ctrl+V):
+                    </label>
+                    <textarea
+                      rows={8}
+                      value={pastedDataText}
+                      onChange={(e) => setPastedDataText(e.target.value)}
+                      placeholder="Google Sheet me rows select karke Ctrl+C karein aur yahan Ctrl+V karein...&#10;Columns automatically PO, Customer, Items, Qty, Rate, Dispatch, Status etc. me map honge."
+                      className="w-full p-2.5 border border-slate-300 rounded-lg font-mono text-[11px] focus:ring-1 focus:ring-emerald-500 focus:outline-none"
+                    />
+                  </div>
+
+                  {/* Firebase Auto-Sync Checkbox card */}
+                  <div className="p-3 bg-amber-50/70 rounded-xl border border-amber-200/90">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoSyncToFirebase}
+                        onChange={(e) => setAutoSyncToFirebase(e.target.checked)}
+                        className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                      />
+                      <span className="font-bold text-xs text-amber-950 flex items-center gap-1.5">
+                        <Flame className="w-3.5 h-3.5 fill-amber-600 text-amber-600" />
+                        Save pasted data to Firebase Realtime Database
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: FILE UPLOAD */}
+              {importTabMode === 'file' && (
+                <div className="space-y-3">
+                  <div>
+                    <label className="text-[11px] font-semibold text-slate-700 block mb-1">
+                      Select a .CSV or .TXT file from your computer:
+                    </label>
+                    <input
+                      type="file"
+                      accept=".csv,.tsv,.txt"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          const reader = new FileReader();
+                          reader.onload = (event) => {
+                            const content = event.target?.result as string;
+                            if (content) setPastedDataText(content);
+                          };
+                          reader.readAsText(file);
+                        }
+                      }}
+                      className="w-full text-xs text-slate-500 file:mr-4 file:py-1.5 file:px-3 file:rounded-md file:border-0 file:text-xs file:font-semibold file:bg-slate-100 file:text-slate-700 hover:file:bg-slate-200 cursor-pointer"
+                    />
+                  </div>
+
+                  {pastedDataText && (
+                    <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-mono text-slate-600 max-h-28 overflow-y-auto">
+                      File loaded (~{pastedDataText.split('\n').filter(Boolean).length} rows detected)
+                    </div>
+                  )}
+
+                  {/* Firebase Auto-Sync Checkbox card */}
+                  <div className="p-3 bg-amber-50/70 rounded-xl border border-amber-200/90">
+                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={autoSyncToFirebase}
+                        onChange={(e) => setAutoSyncToFirebase(e.target.checked)}
+                        className="rounded text-amber-600 focus:ring-amber-500 w-4 h-4 cursor-pointer"
+                      />
+                      <span className="font-bold text-xs text-amber-950 flex items-center gap-1.5">
+                        <Flame className="w-3.5 h-3.5 fill-amber-600 text-amber-600" />
+                        Save uploaded data to Firebase Realtime Database
+                      </span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {/* Upload Mode Card: Clean 1:1 Fresh Upload vs Append */}
+              <div className="p-3 bg-blue-50/80 rounded-xl border border-blue-200 text-xs space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-blue-950 flex items-center gap-1.5">
+                    <span>⚡ Upload Mode:</span>
+                  </span>
+                  <span className="text-[10px] text-blue-800 font-semibold bg-blue-100 px-2 py-0.5 rounded-full border border-blue-300">
+                    Recommended: Replace All (Zero Duplicates)
+                  </span>
+                </div>
+                <div className="space-y-1.5 pl-1">
+                  <label className="flex items-center gap-2 cursor-pointer font-bold text-slate-900 select-none">
+                    <input
+                      type="radio"
+                      name="importReplaceMode"
+                      checked={importReplaceMode}
+                      onChange={() => setImportReplaceMode(true)}
+                      className="text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                    />
+                    <span>✓ Replace All Rows (Clean 1:1 Fresh Upload — Purges old/duplicate rows)</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer font-medium text-slate-600 select-none">
+                    <input
+                      type="radio"
+                      name="importReplaceMode"
+                      checked={!importReplaceMode}
+                      onChange={() => setImportReplaceMode(false)}
+                      className="text-blue-600 focus:ring-blue-500 w-4 h-4 cursor-pointer"
+                    />
+                    <span>Append to Existing Rows (Add rows below current data)</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div className="pt-3 flex items-center justify-between border-t border-slate-200">
+                <span className="text-[11px] text-slate-500">
+                  Multiple times import kar sakte hain — clean 1:1 mapping ensure hogi!
+                </span>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowImportModal(false);
+                      setImportError(null);
+                    }}
+                    className="px-3.5 py-1.5 text-slate-600 hover:text-slate-800 font-medium"
+                  >
+                    Cancel
+                  </button>
+
+                  {importTabMode === 'sheet' ? (
+                    <button
+                      type="button"
+                      disabled={isFetchingSheet || !importSheetId.trim() || !importTabName.trim()}
+                      onClick={handleFetchFromGoogleSheet}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg disabled:opacity-50 flex items-center gap-1.5 shadow-sm transition-all"
+                    >
+                      {isFetchingSheet ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Fetching Google Sheet...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-4 h-4" />
+                          <span>Fetch &amp; Import from Sheet</span>
+                        </>
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!pastedDataText.trim()}
+                      onClick={() => handleParseImportedData(pastedDataText, autoSyncToFirebase, importTabMode === 'paste' ? 'Pasted Data' : 'Uploaded File')}
+                      className="px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-lg disabled:opacity-50 flex items-center gap-1.5 shadow-sm transition-all"
+                    >
+                      <Upload className="w-4 h-4" />
+                      <span>Import into Sheet Grid</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: COLUMN VISIBILITY MANAGER (HIDE / SHOW MANUAL COLUMNS & HIDE SELECTED) */}
+      {showColManager && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full border border-slate-200 overflow-hidden">
+            <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-sm flex items-center gap-2">
+                  <Columns className="w-4 h-4 text-emerald-400" />
+                  Customize Visible Columns (Hide / Show Manual Columns)
+                </h3>
+                <p className="text-[11px] text-slate-300">
+                  Select which columns appear in your spreadsheet grid
+                </p>
+              </div>
+              <button onClick={() => setShowColManager(false)} className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 space-y-3 max-h-[60vh] overflow-y-auto text-xs">
+              {/* Quick toggle presets */}
+              <div className="flex flex-wrap items-center gap-2 pb-2 border-b border-slate-200">
+                <button
+                  onClick={() => {
+                    const all: Record<string, boolean> = {};
+                    fmsColumnMapping.forEach(c => all[c.sheetCol] = true);
+                    setVisibleCols(all);
+                  }}
+                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700"
+                >
+                  Show All 45
+                </button>
+                <button
+                  onClick={() => {
+                    const focused: Record<string, boolean> = {};
+                    fmsColumnMapping.forEach(c => {
+                      focused[c.sheetCol] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AN', 'AO', 'AP'].includes(c.sheetCol);
+                    });
+                    setVisibleCols(focused);
+                  }}
+                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700"
+                >
+                  Standard FMS View (28)
+                </button>
+                <button
+                  onClick={() => {
+                    const min: Record<string, boolean> = {};
+                    fmsColumnMapping.forEach(c => {
+                      min[c.sheetCol] = ['B', 'C', 'G', 'K', 'L', 'Y', 'Z', 'AN'].includes(c.sheetCol);
+                    });
+                    setVisibleCols(min);
+                  }}
+                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700"
+                >
+                  Compact Dispatch (8)
+                </button>
+              </div>
+
+              {/* Grid of all columns */}
+              <div className="grid grid-cols-2 gap-1.5">
+                {fmsColumnMapping.map(col => (
+                  <label
+                    key={col.sheetCol}
+                    className={`flex items-center gap-2 p-1.5 rounded border transition-colors cursor-pointer ${
+                      visibleCols[col.sheetCol] ? 'bg-emerald-50/60 border-emerald-200 text-slate-900' : 'bg-slate-50 border-slate-200 text-slate-400'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!visibleCols[col.sheetCol]}
+                      onChange={(e) => setVisibleCols(prev => ({ ...prev, [col.sheetCol]: e.target.checked }))}
+                      className="rounded text-emerald-600 focus:ring-emerald-500"
+                    />
+                    <span className="font-mono font-bold text-[11px] w-6 text-emerald-800">{col.sheetCol}</span>
+                    <span className="truncate text-xs">{col.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+              <span className="text-[11px] text-slate-500">
+                {Object.values(visibleCols).filter(Boolean).length} of 45 columns visible
+              </span>
+              <button
+                onClick={() => setShowColManager(false)}
+                className="px-4 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-semibold hover:bg-slate-800"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: FIREBASE CLOUD SYNC & HISTORICAL DATA UPLOAD */}
+      {showFirebaseModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-xl w-full border border-slate-200 overflow-hidden">
+            <div className="px-6 py-4 bg-gradient-to-r from-amber-600 to-orange-700 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-base flex items-center gap-2">
+                  <Flame className="w-5 h-5 fill-white" />
+                  Firebase Cloud Sync &amp; Historical Data Upload
+                </h3>
+                <p className="text-xs text-amber-100">
+                  Load up to 1 Lakh+ rows without browser lag or script timeouts
+                </p>
+              </div>
+              <button onClick={() => setShowFirebaseModal(false)} className="text-amber-100 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-4 text-xs">
+              <div className="bg-amber-50 p-3.5 rounded-xl border border-amber-200 text-amber-950 space-y-1">
+                <span className="font-bold block text-sm flex items-center gap-1.5">
+                  <Database className="w-4 h-4 text-amber-700" />
+                  Firebase Data Kahan Save Hota Hai?
+                </span>
+                <p className="text-[11px] text-amber-900/90 leading-relaxed">
+                  Data <strong>Firebase Console &gt; Build &gt; Realtime Database &gt; Data</strong> tab me <code>/product_automation</code> aur <code>/closed_orders</code> me save hota hai.
+                  (Firestore Database me nahi, Realtime Database me check karein!)
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <div>
+                  <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                    Firebase Realtime Database URL:
+                  </label>
+                  <input
+                    type="text"
+                    value={firebaseUrl}
+                    onChange={(e) => setFirebaseUrl(e.target.value)}
+                    placeholder="https://your-project-id-default-rtdb.firebaseio.com"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg font-mono focus:ring-1 focus:ring-amber-500 focus:outline-none"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">
+                    📌 <strong>URL Kahan Milegi:</strong> Firebase Console &gt; Left menu <strong>Build</strong> &gt; <strong>Realtime Database</strong> &gt; Data tab ke bilkul upar di hui URL copy karke yahan paste karein.
+                  </span>
+                </div>
+
+                <div>
+                  <label className="text-[11px] font-bold text-slate-700 block mb-1">
+                    Firebase Database Secret (Auth Token):
+                  </label>
+                  <input
+                    type="text"
+                    value={firebaseSecret}
+                    onChange={(e) => setFirebaseSecret(e.target.value)}
+                    placeholder="iIElINFgR124ssaG3QWjExz2lT72cRh5g502oP6J"
+                    className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg font-mono focus:ring-1 focus:ring-amber-500 focus:outline-none bg-slate-50"
+                  />
+                  <span className="text-[10px] text-slate-500 mt-0.5 block">
+                    Firebase Console &gt; Project Settings &gt; Service Accounts &gt; Database Secrets
+                  </span>
+                </div>
+              </div>
+
+              {/* Upload Progress Bar if active */}
+              {uploadProgress !== null && (
+                <div className="space-y-1.5 p-3 bg-slate-50 rounded-lg border border-slate-200">
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                    <span>Uploading Orders to Firebase...</span>
+                    <span>{uploadProgress}%</span>
+                  </div>
+                  <div className="w-full h-2 bg-slate-200 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-emerald-600 transition-all duration-300 rounded-full"
+                      style={{ width: `${uploadProgress}%` }}
+                    ></div>
+                  </div>
+                  <span className="text-[11px] text-slate-500">
+                    Chunking: 100 rows per batch payload (Zero Quota Loss)
+                  </span>
+                </div>
+              )}
+
+              {/* Action Buttons */}
+              <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      localStorage.setItem(
+                        LOCAL_STORAGE_FIREBASE_CONFIG,
+                        JSON.stringify({ url: firebaseUrl, secret: firebaseSecret })
+                      );
+                      setSyncFeedback('Saved Firebase URL & Secret Token to application!');
+                      setTimeout(() => setSyncFeedback(null), 3000);
+                    }}
+                    className="w-full sm:w-auto px-3.5 py-2 border border-slate-300 rounded-lg font-medium text-slate-700 hover:bg-slate-50 text-xs"
+                  >
+                    Save Config
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const targetUrl = firebaseUrl.trim().replace(/\/+$/, '');
+                        const authParam = firebaseSecret ? `?auth=${encodeURIComponent(firebaseSecret)}` : '';
+                        const testUrl = `${targetUrl}/_connection_test.json${authParam}`;
+                        setSyncFeedback('Testing Firebase connection...');
+                        const resp = await fetch(testUrl, {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            tested_at: new Date().toISOString(),
+                            status: 'Connected',
+                            client: 'GINZA Web FMS'
+                          })
+                        });
+                        if (resp.ok) {
+                          setSyncFeedback(`✓ Firebase Connected Successfully! (HTTP ${resp.status})`);
+                        } else {
+                          const errTxt = await resp.text();
+                          setSyncFeedback(`Firebase Connection Failed: HTTP ${resp.status} - ${errTxt.substring(0, 100)}`);
+                        }
+                      } catch (err: any) {
+                        setSyncFeedback(`Firebase Test Error: ${err.message || 'Network error'}`);
+                      }
+                      setTimeout(() => setSyncFeedback(null), 5000);
+                    }}
+                    className="w-full sm:w-auto px-3.5 py-2 border border-amber-300 bg-amber-50 rounded-lg font-semibold text-amber-900 hover:bg-amber-100 text-xs"
+                  >
+                    📡 Test Ping
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={uploadProgress !== null}
+                  onClick={handleUploadToFirebase}
+                  className="w-full sm:w-auto px-4 py-2 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-lg shadow-sm flex items-center justify-center gap-2 text-xs"
+                >
+                  <CloudUpload className="w-4 h-4" />
+                  <span>1-Click Upload Data to Firebase</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: ADD NEW MULTI-ITEM ORDER */}
+      {showNewOrderModal && (
+        <NewOrderModal
+          onClose={() => setShowNewOrderModal(false)}
+          onSubmit={handleCreateNewOrder}
+        />
+      )}
+
+      {/* MODAL: ADD ITEM TO EXISTING ORDER */}
+      {addingItemToOrder && (
+        <AddItemModal
+          order={addingItemToOrder}
+          onClose={() => setAddingItemToOrder(null)}
+          onSubmit={(itemData) => handleAddItemToExistingOrder(addingItemToOrder, itemData)}
+        />
+      )}
+
+      {/* MODAL: QUICK EDIT ORDER NO (COL X) */}
+      {editingOrderNo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-xs p-4">
+          <div className="bg-white rounded-xl shadow-xl border border-slate-200 p-5 max-w-md w-full">
+            <h3 className="text-sm font-bold text-slate-900">
+              Edit Order Number (Col X)
+            </h3>
+            <p className="text-xs text-slate-500 mt-1">
+              Set or update Sales Order number for <strong className="text-slate-800">{editingOrderNo.po}</strong>.
+            </p>
+            <div className="mt-4 space-y-3">
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Sales Order Number (Col X)</label>
+                <input
+                  type="text"
+                  value={editingOrderNo.value}
+                  onChange={(e) => setEditingOrderNo({ ...editingOrderNo, value: e.target.value })}
+                  placeholder="e.g. DMN/02241/25-26 / TDN/03590/25-26"
+                  className="w-full px-3 py-1.5 text-xs border border-slate-300 rounded-lg focus:ring-1 focus:ring-emerald-500 focus:outline-none font-mono"
+                  autoFocus
+                />
+              </div>
+            </div>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                onClick={() => setEditingOrderNo(null)}
+                className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-800"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleSaveOrderNo}
+                className="px-4 py-1.5 text-xs font-medium bg-emerald-700 text-white rounded-lg hover:bg-emerald-800"
+              >
+                Save Order No
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: WHATSAPP DISPATCH PREVIEW */}
+      {whatsAppModalOrder && (() => {
+        const cleanPhone = (whatsAppModalOrder.customerNumber || '').replace(/[+\-\s]/g, '').replace(/^0+/, '');
+        const itemBlocks = whatsAppModalOrder.items.map(it => (
+          `*Item Name*    : ${it.itemName}\n` +
+          `*Color*        : ${it.color}\n` +
+          `*Dispatch Qnt* : ${it.dispatchQty || 0}\n` +
+          `*Unit of Item* : ${it.unitOfItem}`
+        )).join('\n--------------------------\n');
+
+        const messageText =
+          `Dear ${whatsAppModalOrder.customerName},\n\n` +
+          `We are pleased to inform you that your order has been *successfully dispatched*.\n\n` +
+          `*Order Summary*\n` +
+          `--------------------------\n` +
+          `Order Date : ${whatsAppModalOrder.orderDate}\n` +
+          `Order No   : ${whatsAppModalOrder.orderNo || 'DMN/02241/25-26'}\n` +
+          `Transporter: ${whatsAppModalOrder.transporterName || 'Mehta transport'}\n\n` +
+          `*Dispatched Items*\n` +
+          `--------------------------\n` +
+          itemBlocks + `\n\n` +
+          `Thank you for choosing Ginza Industries Ltd.`;
+
+        const waUrl = `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodeURIComponent(messageText)}`;
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-200">
+              <div className="px-5 py-4 bg-emerald-700 text-white flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="p-1.5 rounded-lg bg-emerald-800 text-white">
+                    <MessageSquare className="w-5 h-5" />
+                  </span>
+                  <div>
+                    <h3 className="font-bold text-sm">WhatsApp Dispatch Link Preview (Col AO → AP)</h3>
+                    <p className="text-[11px] text-emerald-100">Formula generated via HYPERLINK + ENCODEURL</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setWhatsAppModalOrder(null)}
+                  className="p-1 rounded-lg text-emerald-100 hover:text-white hover:bg-emerald-800 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
+                <div className="grid grid-cols-2 gap-3 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200">
+                  <div>
+                    <span className="text-slate-500 block text-[11px]">Customer &amp; Phone (Col P)</span>
+                    <span className="font-bold text-slate-800">{whatsAppModalOrder.customerName}</span>
+                    <span className="font-mono text-emerald-700 block">{cleanPhone || '8800421410'}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[11px]">Order No &amp; Date (Col X &amp; E)</span>
+                    <span className="font-bold text-slate-800">{whatsAppModalOrder.orderNo || 'DMN/02241/25-26'}</span>
+                    <span className="text-slate-600 block">{whatsAppModalOrder.orderDate}</span>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-semibold text-slate-700">
+                      Dispatched Message (Multi-item summary):
+                    </label>
+                    <span className="text-[11px] text-emerald-700 font-medium bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                      {whatsAppModalOrder.items.length} Product Items
+                    </span>
+                  </div>
+                  <div className="bg-[#eef8f2] border border-[#c1e7ce] p-3.5 rounded-xl font-mono text-xs whitespace-pre-wrap text-slate-800 leading-relaxed shadow-inner">
+                    {messageText}
+                  </div>
+                </div>
+              </div>
+
+              <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(messageText);
+                    setCopiedWhatsAppMsg(true);
+                    setTimeout(() => setCopiedWhatsAppMsg(false), 2500);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 transition-colors"
+                >
+                  {copiedWhatsAppMsg ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedWhatsAppMsg ? 'Copied Message!' : 'Copy Text'}
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setWhatsAppModalOrder(null)}
+                    className="px-3.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-800 rounded-lg"
+                  >
+                    Close
+                  </button>
+                  <a
+                    href={waUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 transition-colors shadow-xs"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Send on WhatsApp</span>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* MODAL: INSTANT CONFIRMATION WHATSAPP PREVIEW (Col AE ➔ AF) */}
+      {confirmWhatsAppModalOrder && (() => {
+        const cleanPhone = (confirmWhatsAppModalOrder.customerNumber || '').replace(/[^0-9]/g, '');
+        const displayOrderNo = confirmWhatsAppModalOrder.orderNo?.trim() || confirmWhatsAppModalOrder.customerPO?.trim() || 'Pending';
+        const NL = '\n';
+        const NL2 = '\n\n';
+
+        const itemBlocks = confirmWhatsAppModalOrder.items.map((it, idx) => {
+          const itemHeader = confirmWhatsAppModalOrder.items.length > 1 ? `*Item ${idx + 1}:*${NL}` : '';
+          return (
+            itemHeader +
+            `Item Name: ${it.itemName}${NL}` +
+            `Color: ${it.color}${NL}` +
+            `Qnt: ${it.qty}${NL}` +
+            `Price: ${it.rate}${NL}` +
+            `Delivery Date: ${it.deliveryDate || ''}`
+          );
+        });
+
+        const itemsText = itemBlocks.join(`${NL}--------------------------${NL}`);
+        let addressLine = '';
+        if (confirmWhatsAppModalOrder.deliveryAddress && confirmWhatsAppModalOrder.deliveryAddress.trim()) {
+          addressLine = `Delivery Address: ${confirmWhatsAppModalOrder.deliveryAddress.trim()}${NL}`;
+        }
+
+        const messageText =
+          `Dear ${confirmWhatsAppModalOrder.customerName || 'Customer'},${NL2}` +
+          `Thank you for choosing Ginza Industries Ltd.${NL2}` +
+          `Your Order has been successfully received and is now being processed.${NL2}` +
+          `*Order Summary*${NL2}` +
+          `Order Date: ${confirmWhatsAppModalOrder.orderDate}${NL}` +
+          `Order Number: ${displayOrderNo}${NL}` +
+          addressLine +
+          `--------------------------${NL}` +
+          itemsText + `${NL}` +
+          `--------------------------${NL2}` +
+          `Thank you for your continued support & trust in Soie and Ginza Industries Limited.`;
+
+        const waUrl = `https://api.whatsapp.com/send?phone=${cleanPhone}&text=${encodeURIComponent(messageText)}`;
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden border border-slate-200">
+              <div className="px-5 py-4 bg-emerald-700 text-white flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <span className="p-1.5 rounded-lg bg-emerald-800 text-white">
+                    <MessageSquare className="w-5 h-5" />
+                  </span>
+                  <div>
+                    <h3 className="font-bold text-sm">Order Confirmation WhatsApp Preview (Col AE ➔ AF)</h3>
+                    <p className="text-[11px] text-emerald-100">Formula generated via HYPERLINK + ENCODEURL</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setConfirmWhatsAppModalOrder(null)}
+                  className="p-1 rounded-lg text-emerald-100 hover:text-white hover:bg-emerald-800 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
+                <div className="grid grid-cols-2 gap-3 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200">
+                  <div>
+                    <span className="text-slate-500 block text-[11px]">Customer &amp; Phone (Col P)</span>
+                    <span className="font-bold text-slate-800">{confirmWhatsAppModalOrder.customerName}</span>
+                    <span className="font-mono text-emerald-700 block">{cleanPhone || '8800421410'}</span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500 block text-[11px]">Order No &amp; Date (Col X &amp; E)</span>
+                    <span className="font-bold text-slate-800">{displayOrderNo}</span>
+                    <span className="text-slate-600 block">{confirmWhatsAppModalOrder.orderDate}</span>
+                  </div>
+                </div>
+
+                <div>
+                  <div className="flex items-center justify-between mb-1.5">
+                    <label className="text-xs font-semibold text-slate-700">
+                      Order Confirmation Message (Instant Booking Notice):
+                    </label>
+                    <span className="text-[11px] text-emerald-700 font-medium bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                      {confirmWhatsAppModalOrder.items.length} Product Items
+                    </span>
+                  </div>
+                  <div className="bg-[#eef8f2] border border-[#c1e7ce] p-3.5 rounded-xl font-mono text-xs whitespace-pre-wrap text-slate-800 leading-relaxed shadow-inner">
+                    {messageText}
+                  </div>
+                </div>
+              </div>
+
+              <div className="px-5 py-3.5 bg-slate-50 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(messageText);
+                    setCopiedConfirmMsg(true);
+                    setTimeout(() => setCopiedConfirmMsg(false), 2500);
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 transition-colors"
+                >
+                  {copiedConfirmMsg ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copiedConfirmMsg ? 'Copied Message!' : 'Copy Text'}
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => setConfirmWhatsAppModalOrder(null)}
+                    className="px-3.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-800 rounded-lg"
+                  >
+                    Close
+                  </button>
+                  <a
+                    href={waUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-semibold rounded-lg bg-emerald-700 text-white hover:bg-emerald-800 transition-colors shadow-xs"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>Send on WhatsApp</span>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+};
+
+// RENDER FUNCTION FOR ROWS (Handles Merged A-E, N-X, and Freeze Panes)
+function renderSpreadsheetRows(
+  orders: GroupedOrder[],
+  useMerge: boolean,
+  visibleCols: Record<string, boolean>,
+  freezeColumns: number,
+  handlers: {
+    onDispatchChange: (orderKey: string, item: any, valStr: string) => void;
+    onItemStatusChange: (orderId: string, newStatus: 'Open' | 'In-Progress' | 'Closed' | 'Complete') => void;
+    onDeleteOrder: (orderKey: string, poName: string) => void;
+    onDeleteItem: (itemOrderId: string) => void;
+    onOpenOrderNoModal: (data: { key: string; po: string; value: string }) => void;
+    onOpenAddItemModal: (order: GroupedOrder) => void;
+    onOpenConfirmWhatsAppModal: (order: GroupedOrder) => void;
+    onOpenWhatsAppModal: (order: GroupedOrder) => void;
+    acStatuses: Record<string, string>;
+    setAcStatuses: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+    anStatuses: Record<string, string>;
+    setAnStatuses: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+    lrNumbers: Record<string, string>;
+    setLrNumbers: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+    setSyncFeedback: (msg: string | null) => void;
+    colWStatuses: Record<string, string>;
+    onUpdateColW: (orderKey: string, val: string) => void;
+    colXRemarks: Record<string, string>;
+    onUpdateColX: (orderKey: string, val: string) => void;
+    colAEChecks: Record<string, boolean>;
+    onToggleColAE: (orderKey: string, checked: boolean) => void;
+    colAFTimestamps: Record<string, string>;
+    colAGRemarks: Record<string, string>;
+    onUpdateColAG: (orderKey: string, val: string) => void;
+    colAHChecks: Record<string, boolean>;
+    onToggleColAH: (orderKey: string, checked: boolean) => void;
+    colAITimestamps: Record<string, string>;
+    colAJRemarks: Record<string, string>;
+    onUpdateColAJ: (orderKey: string, val: string) => void;
+  },
+  startRowIndex: number = 2
+) {
+  let rowNumber = startRowIndex; // Sheets start row 2 (or offset for page)
+  const rows: React.ReactNode[] = [];
+
+  orders.forEach((order) => {
+    const rowSpan = useMerge ? order.items.length : 1;
+    const currentOrderKey = order.orderKey;
+    const currentStatus = order.statusAN || 'Open';
+
+    order.items.forEach((item, itemIdx) => {
+      const isFirst = itemIdx === 0;
+      const isLast = itemIdx === order.items.length - 1;
+      const showHeaderCols = !useMerge || isFirst;
+      const thisRow = rowNumber;
+
+      const bottomBorderClass = useMerge && isLast
+        ? 'border-b-2 border-b-slate-400'
+        : 'border-b border-b-slate-200';
+
+      const cellBottomBorder = useMerge ? 'border-b-2 border-b-slate-400' : '';
+
+      // Freeze column positioning styles
+      const numSticky = freezeColumns >= 1 ? 'sticky left-0 z-20 bg-slate-50 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.15)]' : '';
+      const poSticky = freezeColumns >= 2 ? 'sticky left-[48px] z-20 bg-blue-50/90 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.15)]' : '';
+      const nameSticky = freezeColumns >= 3 ? 'sticky left-[158px] z-20 bg-blue-50/90 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.15)]' : '';
+
+      rows.push(
+        <tr
+          key={`${order.orderKey}_${item.id}_${itemIdx}`}
+          className={`hover:bg-slate-50 transition-colors ${bottomBorderClass}`}
+        >
+          {/* Row Number */}
+          <td
+            className={`px-1.5 py-0.5 text-center bg-slate-50 border-r border-slate-300 font-mono text-[10px] text-slate-500 ${numSticky} ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+          >
+            {thisRow}
+          </td>
+
+          {/* Quick Action Column (Add Item / Delete) */}
+          {showHeaderCols ? (
+            <td
+              rowSpan={rowSpan}
+              className={`px-1 py-0.5 text-center bg-slate-50/80 border-r border-slate-300 align-middle whitespace-nowrap ${cellBottomBorder}`}
+            >
+              <div className="flex items-center justify-center gap-0.5">
+                <button
+                  onClick={() => handlers.onOpenAddItemModal(order)}
+                  className="p-0.5 rounded text-slate-500 hover:text-emerald-700 hover:bg-emerald-50 transition-colors"
+                  title="Add another Item row to this order"
+                >
+                  <Plus className="w-3 h-3" />
+                </button>
+                <button
+                  onClick={() => handlers.onDeleteOrder(order.orderKey, order.customerPO || order.orderKey)}
+                  className="p-0.5 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors"
+                  title="Delete this entire order"
+                >
+                  <Trash2 className="w-3 h-3" />
+                </button>
+              </div>
+            </td>
+          ) : null}
+
+          {/* COLUMNS A TO C: VERTICAL MERGE */}
+          {showHeaderCols && (
+            <>
+              {/* Col A: Timestamp */}
+              {visibleCols['A'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle bg-blue-50/20 whitespace-nowrap text-[11px] ${cellBottomBorder}`}
+                >
+                  {order.timestamp}
+                </td>
+              )}
+
+              {/* Col B: Customer Name */}
+              {visibleCols['B'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 font-bold text-slate-900 align-middle bg-blue-50/20 whitespace-nowrap text-[11px] ${poSticky} ${cellBottomBorder}`}
+                >
+                  <div className="flex items-center gap-1">
+                    <span className="font-bold text-slate-900">{order.customerName}</span>
+                    {useMerge && order.items.length > 1 && (
+                      <span className="text-[9px] px-1 py-0.1 rounded-full bg-blue-100 text-blue-800 font-mono font-bold">
+                        {order.items.length} itm
+                      </span>
+                    )}
+                  </div>
+                </td>
+              )}
+
+              {/* Col C: Order Date */}
+              {visibleCols['C'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 align-middle bg-blue-50/20 whitespace-nowrap text-[11px] ${cellBottomBorder}`}
+                >
+                  {order.orderDate}
+                </td>
+              )}
+            </>
+          )}
+
+          {/* COLUMNS D TO L: INDIVIDUAL PRODUCT ITEM ROWS (UNMERGED) */}
+          {/* Col D: Unit */}
+          {visibleCols['D'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 whitespace-nowrap font-medium text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              {item.unit}
+            </td>
+          )}
+
+          {/* Col E: Item Name */}
+          {visibleCols['E'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 font-semibold text-slate-900 whitespace-nowrap text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              <div className="flex items-center justify-between gap-1">
+                <span>{item.itemName}</span>
+                {order.items.length > 1 && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handlers.onDeleteItem(item.id);
+                    }}
+                    className="opacity-0 group-hover:opacity-100 hover:text-rose-600 text-slate-300 p-0.5 rounded"
+                    title="Delete item row"
+                  >
+                    <X className="w-2.5 h-2.5" />
+                  </button>
+                )}
+              </div>
+            </td>
+          )}
+
+          {/* Col F: Color */}
+          {visibleCols['F'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 whitespace-nowrap text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              {item.color}
+            </td>
+          )}
+
+          {/* Col G: Width */}
+          {visibleCols['G'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 whitespace-nowrap text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              {item.width}
+            </td>
+          )}
+
+          {/* Col H: Unit (of item) */}
+          {visibleCols['H'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 whitespace-nowrap text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              {item.unitOfItem}
+            </td>
+          )}
+
+          {/* Col I: Qty */}
+          {visibleCols['I'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 font-mono font-bold text-slate-900 text-right whitespace-nowrap text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              {item.qty.toLocaleString()}
+            </td>
+          )}
+
+          {/* Col J: Rate */}
+          {visibleCols['J'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 font-mono text-slate-700 text-right whitespace-nowrap text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              ₹{item.rate}
+            </td>
+          )}
+
+          {/* Col K: Discount */}
+          {visibleCols['K'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 font-mono text-slate-700 text-right whitespace-nowrap text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              {item.discount}%
+            </td>
+          )}
+
+          {/* Col L: Delivery Date */}
+          {visibleCols['L'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 whitespace-nowrap text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              {item.deliveryDate}
+            </td>
+          )}
+
+          {/* COLUMNS M TO T: VERTICAL MERGE */}
+          {showHeaderCols && (
+            <>
+              {/* Col M: Remark */}
+              {visibleCols['M'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle bg-blue-50/20 whitespace-nowrap max-w-[180px] truncate text-[11px] ${cellBottomBorder}`}
+                  title={order.remark}
+                >
+                  {order.remark || '—'}
+                </td>
+              )}
+
+              {/* Col N: Customer Number */}
+              {visibleCols['N'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 font-mono text-slate-700 align-middle bg-blue-50/20 whitespace-nowrap text-[11px] ${cellBottomBorder}`}
+                >
+                  {order.customerNumber}
+                </td>
+              )}
+
+              {/* Col O: Billing Address */}
+              {visibleCols['O'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle bg-blue-50/20 whitespace-nowrap max-w-[180px] truncate text-[11px] ${cellBottomBorder}`}
+                  title={order.billingAddress}
+                >
+                  {order.billingAddress}
+                </td>
+              )}
+
+              {/* Col P: Delivery Address */}
+              {visibleCols['P'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle bg-blue-50/20 whitespace-nowrap max-w-[180px] truncate text-[11px] ${cellBottomBorder}`}
+                  title={order.deliveryAddress}
+                >
+                  {order.deliveryAddress}
+                </td>
+              )}
+
+              {/* Col Q: Sales Person Name */}
+              {visibleCols['Q'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 align-middle bg-blue-50/20 whitespace-nowrap text-[11px] ${cellBottomBorder}`}
+                >
+                  {order.salesPerson}
+                </td>
+              )}
+
+              {/* Col R: Sales Person Contact */}
+              {visibleCols['R'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle bg-blue-50/20 whitespace-nowrap font-mono text-[11px] ${cellBottomBorder}`}
+                >
+                  {order.salesPersonContact || '—'}
+                </td>
+              )}
+
+              {/* Col S: Order No (Editable with Modal) */}
+              {visibleCols['S'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 font-mono font-medium text-slate-900 align-middle bg-blue-50/20 whitespace-nowrap text-[11px] ${cellBottomBorder}`}
+                >
+                  <div className="flex items-center gap-1">
+                    <span className={order.orderNo ? 'font-bold text-slate-900' : 'text-slate-400 italic'}>
+                      {order.orderNo || 'Set SO#'}
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handlers.onOpenOrderNoModal({ key: order.orderKey, po: order.customerPO || '', value: order.orderNo });
+                      }}
+                      className="text-slate-400 hover:text-emerald-700 p-0.5 rounded transition-colors"
+                      title="Edit Order Number in Col S"
+                    >
+                      <Edit3 className="w-2.5 h-2.5" />
+                    </button>
+                  </div>
+                </td>
+              )}
+
+              {/* Col T: Customer Mail Id */}
+              {visibleCols['T'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle bg-blue-50/20 whitespace-nowrap text-[10px] ${cellBottomBorder}`}
+                >
+                  {order.customerMailId || order.customerEmail || '—'}
+                </td>
+              )}
+            </>
+          )}
+
+          {/* COLUMN U: DISPATCH QNT (ITEM ROW USER ENTRY) */}
+          {visibleCols['U'] && (
+            <td
+              className={`px-1.5 py-0.5 border-r border-slate-300 bg-amber-50/40 whitespace-nowrap text-right ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              <div className="flex items-center justify-end gap-1">
+                <input
+                  type="number"
+                  step="any"
+                  value={item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : ''}
+                  placeholder="0"
+                  onChange={(e) => handlers.onDispatchChange(order.orderKey, item, e.target.value)}
+                  className="w-18 px-1.5 py-0.5 text-right font-mono text-[11px] font-bold text-amber-950 bg-white border border-amber-300 rounded focus:ring-1 focus:ring-amber-500 focus:outline-none h-6 print:hidden"
+                />
+                <span className="hidden print:inline-block font-mono font-bold text-slate-900 text-[11px]">
+                  {item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : 0}
+                </span>
+              </div>
+            </td>
+          )}
+
+          {/* COLUMN V: BALANCE QNT (= I - U) */}
+          {visibleCols['V'] && (
+            <td
+              className={`px-2 py-0.5 border-r border-slate-300 bg-emerald-50/40 whitespace-nowrap text-right text-[11px] ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+            >
+              <div className="flex items-center justify-end gap-1.5">
+                <span
+                  className={`font-mono font-bold text-[11px] tabular-nums ${
+                    (item.balanceQty || 0) <= 0
+                      ? 'text-emerald-700'
+                      : (item.dispatchQty || 0) > 0
+                      ? 'text-amber-700'
+                      : 'text-slate-900'
+                  }`}
+                >
+                  {item.balanceQty?.toLocaleString()}
+                </span>
+                {(item.balanceQty || 0) <= 0 ? (
+                  <span className="text-[9px] px-1 py-0.1 rounded bg-emerald-100 text-emerald-800 font-bold">
+                    Done
+                  </span>
+                ) : (item.dispatchQty || 0) > 0 ? (
+                  <span className="text-[9px] px-1 py-0.1 rounded bg-amber-100 text-amber-800 font-bold">
+                    Partial
+                  </span>
+                ) : (
+                  <span className="text-[9px] px-1 py-0.1 rounded bg-slate-100 text-slate-600 font-medium">
+                    Pending
+                  </span>
+                )}
+              </div>
+            </td>
+          )}
+
+          {/* OPERATIONAL COLUMNS W TO AL: VERTICALLY MERGED */}
+          {showHeaderCols && (
+            <>
+              {/* Col W: Status (Manual User Text Edit with Auto-Save) */}
+              {visibleCols['W'] && (
+                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle ${cellBottomBorder}`}>
+                  <input
+                    type="text"
+                    placeholder="Status..."
+                    value={handlers.colWStatuses[currentOrderKey] ?? (order.accountStatus || 'In Production')}
+                    onChange={(e) => handlers.onUpdateColW(currentOrderKey, e.target.value)}
+                    className="w-28 px-1.5 py-0.5 border border-teal-300 rounded text-[11px] font-semibold text-slate-800 bg-teal-50/20 focus:bg-white focus:outline-none focus:ring-1 focus:ring-teal-500 h-6 shadow-2xs"
+                    title="Col W: Editable Status (Auto-saved)"
+                  />
+                </td>
+              )}
+
+              {/* Col X: Remark (Manual User Text Edit with Auto-Save) */}
+              {visibleCols['X'] && (
+                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle ${cellBottomBorder}`}>
+                  <input
+                    type="text"
+                    placeholder="Remark..."
+                    value={handlers.colXRemarks[currentOrderKey] ?? ''}
+                    onChange={(e) => handlers.onUpdateColX(currentOrderKey, e.target.value)}
+                    className="w-32 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 h-6 shadow-2xs"
+                    title="Col X: Editable Logistics Remark (Auto-saved)"
+                  />
+                </td>
+              )}
+
+              {/* Col Y: Approval */}
+              {visibleCols['Y'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 align-middle text-[11px] ${cellBottomBorder}`}>
+                  <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 text-[10px] font-semibold">
+                    {order.approvalStatus || 'APPROVED'}
+                  </span>
+                </td>
+              )}
+
+              {/* Col Z: Timestamp */}
+              {visibleCols['Z'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle text-[10px] font-mono ${cellBottomBorder} whitespace-nowrap`}>
+                  {order.orderNoTimestamp || order.timestamp}
+                </td>
+              )}
+
+              {/* Col AA: Confirmation Mail */}
+              {visibleCols['AA'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 align-middle text-[11px] font-medium text-center ${cellBottomBorder}`}>
+                  Sent
+                </td>
+              )}
+
+              {/* Col AB: Mail Status */}
+              {visibleCols['AB'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-emerald-700 font-medium align-middle text-[11px] text-center ${cellBottomBorder}`}>
+                  Delivered
+                </td>
+              )}
+
+              {/* Col AC: Confirmation Msg (WhatsApp Sent) */}
+              {visibleCols['AC'] && (
+                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle bg-blue-50/20 whitespace-nowrap ${cellBottomBorder}`}>
+                  <select
+                    value={handlers.acStatuses[currentOrderKey] || 'Pending'}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      handlers.setAcStatuses(prev => ({ ...prev, [currentOrderKey]: val }));
+                      handlers.setSyncFeedback(`Col AC Confirmation set to "${val}". ${val === 'Message Sent' ? 'WhatsApp link active in Col AD!' : 'Pending status.'}`);
+                      setTimeout(() => handlers.setSyncFeedback(null), 3500);
+                    }}
+                    className="text-[10px] bg-white border border-blue-300 rounded px-1.5 py-0.5 font-medium text-slate-800 focus:ring-1 focus:ring-blue-500 focus:outline-none h-6"
+                  >
+                    <option value="Pending">Pending</option>
+                    <option value="Message Sent">Message Sent</option>
+                  </select>
+                </td>
+              )}
+
+              {/* Col AD: Whatspp Link (Instant Confirmation AC ➔ AD) */}
+              {visibleCols['AD'] && (
+                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle bg-emerald-50/20 whitespace-nowrap ${cellBottomBorder}`}>
+                  <button
+                    onClick={() => handlers.onOpenConfirmWhatsAppModal(order)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-2xs"
+                    title="Send Order Confirmation WhatsApp"
+                  >
+                    <MessageSquare className="w-3 h-3" />
+                    <span>Send WA</span>
+                    <ExternalLink className="w-2.5 h-2.5 ml-0.5" />
+                  </button>
+                </td>
+              )}
+
+              {/* Col AE: Follow-up 1 (CHECKBOX - when clicked, auto timestamp in Col AF) */}
+              {visibleCols['AE'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-center align-middle ${cellBottomBorder} bg-emerald-50/30`}>
+                  <label className="inline-flex items-center justify-center cursor-pointer p-0.5" title="Check to record Follow-up 1 timestamp in Col AF">
+                    <input
+                      type="checkbox"
+                      checked={!!handlers.colAEChecks[currentOrderKey]}
+                      onChange={(e) => handlers.onToggleColAE(currentOrderKey, e.target.checked)}
+                      className="w-4 h-4 rounded border-slate-300 text-emerald-600 focus:ring-emerald-500 cursor-pointer shadow-2xs"
+                    />
+                  </label>
+                </td>
+              )}
+
+              {/* Col AF: Timestamp (Auto-generated from Col AE Checkbox) */}
+              {visibleCols['AF'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 align-middle text-[10px] font-mono ${cellBottomBorder} whitespace-nowrap bg-emerald-50/10`}>
+                  {handlers.colAFTimestamps[currentOrderKey] ? (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-900 border border-emerald-300 font-bold">
+                      <Clock className="w-3 h-3 text-emerald-600 shrink-0" />
+                      <span>{handlers.colAFTimestamps[currentOrderKey]}</span>
+                    </span>
+                  ) : (
+                    <span className="text-slate-300 italic text-[10px]">—</span>
+                  )}
+                </td>
+              )}
+
+              {/* Col AG: Follow-up 1 Remark (Manual User Text Edit with Auto-Save - EDITABLE!) */}
+              {visibleCols['AG'] && (
+                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle ${cellBottomBorder}`}>
+                  <input
+                    type="text"
+                    placeholder="Follow-up 1 remark..."
+                    value={handlers.colAGRemarks[currentOrderKey] ?? ''}
+                    onChange={(e) => handlers.onUpdateColAG(currentOrderKey, e.target.value)}
+                    className="w-36 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 h-6 shadow-2xs"
+                    title="Col AG: Editable Follow-up 1 Remark (Auto-saved)"
+                  />
+                </td>
+              )}
+
+              {/* Col AH: Follow-up 2 (CHECKBOX - when clicked, auto timestamp in Col AI) */}
+              {visibleCols['AH'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-center align-middle ${cellBottomBorder} bg-sky-50/30`}>
+                  <label className="inline-flex items-center justify-center cursor-pointer p-0.5" title="Check to record Follow-up 2 timestamp in Col AI">
+                    <input
+                      type="checkbox"
+                      checked={!!handlers.colAHChecks[currentOrderKey]}
+                      onChange={(e) => handlers.onToggleColAH(currentOrderKey, e.target.checked)}
+                      className="w-4 h-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500 cursor-pointer shadow-2xs"
+                    />
+                  </label>
+                </td>
+              )}
+
+              {/* Col AI: Timestamp (Auto-generated from Col AH Checkbox) */}
+              {visibleCols['AI'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 align-middle text-[10px] font-mono ${cellBottomBorder} whitespace-nowrap bg-sky-50/10`}>
+                  {handlers.colAITimestamps[currentOrderKey] ? (
+                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-100 text-sky-900 border border-sky-300 font-bold">
+                      <Clock className="w-3 h-3 text-sky-600 shrink-0" />
+                      <span>{handlers.colAITimestamps[currentOrderKey]}</span>
+                    </span>
+                  ) : (
+                    <span className="text-slate-300 italic text-[10px]">—</span>
+                  )}
+                </td>
+              )}
+
+              {/* Col AJ: Follow-up 2 Remark (Manual User Text Edit with Auto-Save - EDITABLE!) */}
+              {visibleCols['AJ'] && (
+                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle ${cellBottomBorder}`}>
+                  <input
+                    type="text"
+                    placeholder="Follow-up 2 remark..."
+                    value={handlers.colAJRemarks[currentOrderKey] ?? ''}
+                    onChange={(e) => handlers.onUpdateColAJ(currentOrderKey, e.target.value)}
+                    className="w-36 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-sky-500 h-6 shadow-2xs"
+                    title="Col AJ: Editable Follow-up 2 Remark (Auto-saved)"
+                  />
+                </td>
+              )}
+
+              {/* Col AK: Transport Name */}
+              {visibleCols['AK'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 align-middle text-[11px] ${cellBottomBorder}`}>
+                  {order.transporterName || 'Atc express'}
+                </td>
+              )}
+
+              {/* Col AL: LR- Number */}
+              {visibleCols['AL'] && (
+                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 font-mono text-slate-800 align-middle ${cellBottomBorder}`}>
+                  <input
+                    type="text"
+                    placeholder="e.g. MEHTA-0041"
+                    value={handlers.lrNumbers[currentOrderKey] || ''}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      handlers.setLrNumbers(prev => ({ ...prev, [currentOrderKey]: val }));
+                    }}
+                    className="w-24 px-1.5 py-0.5 border border-slate-300 rounded font-mono text-[11px] h-6"
+                  />
+                </td>
+              )}
+            </>
+          )}
+
+          {/* COLUMN AM: OPEN / CLOSE (INDIVIDUAL PRODUCT ITEM ROW - UNMERGED) */}
+          {visibleCols['AM'] && (
+            <td
+              className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle bg-sky-50/20 whitespace-nowrap ${
+                useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''
+              }`}
+            >
+              <div className="flex items-center justify-center">
+                <select
+                  value={isItemComplete(item.statusAN) ? 'Complete' : (item.statusAN || 'Open')}
+                  onChange={(e) => handlers.onItemStatusChange(item.id, e.target.value as any)}
+                  className={`text-[11px] font-bold rounded px-1.5 py-0.5 border transition-all cursor-pointer focus:outline-none focus:ring-1 h-6 shadow-2xs ${
+                    isItemComplete(item.statusAN)
+                      ? 'bg-emerald-100 text-emerald-900 border-emerald-400 focus:ring-emerald-500'
+                      : (item.statusAN || 'Open') === 'In-Progress'
+                      ? 'bg-amber-100 text-amber-900 border-amber-400 focus:ring-amber-500'
+                      : 'bg-sky-100 text-sky-900 border-sky-400 focus:ring-sky-500'
+                  }`}
+                >
+                  <option value="Open">🔵 Open</option>
+                  <option value="In-Progress">🟡 In-Progress</option>
+                  <option value="Complete">🟢 Complete</option>
+                </select>
+              </div>
+            </td>
+          )}
+
+          {/* COLUMNS AN TO AQ: DELIVERED WHATSAPP & EMAILS (VERTICALLY MERGED PER ORDER) */}
+          {showHeaderCols && (
+            <>
+              {/* Col AN: Status AN / Delivered Whatspp Msg (Complete / Open / Message Sent) */}
+              {visibleCols['AN'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle whitespace-nowrap ${cellBottomBorder} ${
+                    isItemComplete(order.statusAN) || handlers.anStatuses[currentOrderKey] === 'Complete'
+                      ? 'bg-emerald-50/60'
+                      : 'bg-purple-50/20'
+                  }`}
+                >
+                  <select
+                    value={
+                      isItemComplete(order.statusAN) || handlers.anStatuses[currentOrderKey] === 'Complete'
+                        ? 'Complete'
+                        : (handlers.anStatuses[currentOrderKey] || 'Pending')
+                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      handlers.setAnStatuses(prev => ({ ...prev, [currentOrderKey]: val }));
+                      if (val === 'Complete') {
+                        handlers.onItemStatusChange(order.items[0]?.id, 'Complete');
+                        handlers.setSyncFeedback(`Order "${order.customerName || order.orderNo}" marked Complete in Col AN! Automatically moved to "Closed Orders" tab.`);
+                      } else if (val === 'Open') {
+                        handlers.onItemStatusChange(order.items[0]?.id, 'Open');
+                        handlers.setSyncFeedback(`Order set to "Open" in Col AN.`);
+                      } else {
+                        handlers.setSyncFeedback(`Col AN set to "${val}". ${val === 'Message Sent' ? 'WhatsApp button activated in Col AO!' : 'Pending status.'}`);
+                      }
+                      setTimeout(() => handlers.setSyncFeedback(null), 3500);
+                    }}
+                    className={`text-[10px] rounded px-1.5 py-0.5 font-bold focus:ring-1 focus:outline-none h-6 ${
+                      isItemComplete(order.statusAN) || handlers.anStatuses[currentOrderKey] === 'Complete'
+                        ? 'bg-emerald-100 text-emerald-900 border border-emerald-400 focus:ring-emerald-500'
+                        : 'bg-white border border-purple-300 text-slate-800 focus:ring-purple-500'
+                    }`}
+                  >
+                    <option value="Pending">Pending</option>
+                    <option value="Message Sent">Message Sent</option>
+                    <option value="Open">🔵 Open</option>
+                    <option value="Complete">🟢 Complete</option>
+                  </select>
+                </td>
+              )}
+
+              {/* Col AO: Whatspp Link (Dispatch WhatsApp) */}
+              {visibleCols['AO'] && (
+                <td
+                  rowSpan={rowSpan}
+                  className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle bg-emerald-50/20 whitespace-nowrap ${cellBottomBorder}`}
+                >
+                  <button
+                    onClick={() => handlers.onOpenWhatsAppModal(order)}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-600 text-white hover:bg-emerald-700 transition-colors shadow-2xs"
+                    title="Send WhatsApp Dispatch Notice"
+                  >
+                    <MessageSquare className="w-3 h-3" />
+                    <span>Send WA</span>
+                    <ExternalLink className="w-2.5 h-2.5 ml-0.5" />
+                  </button>
+                </td>
+              )}
+
+              {/* Col AP: Delivery Email */}
+              {visibleCols['AP'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle text-[10px] ${cellBottomBorder}`}>
+                  {order.customerMailId || order.customerEmail || '—'}
+                </td>
+              )}
+
+              {/* Col AQ: Delivery Email Link */}
+              {visibleCols['AQ'] && (
+                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-blue-600 align-middle text-center text-[10px] ${cellBottomBorder}`}>
+                  {order.customerMailId || order.customerEmail ? (
+                    <a
+                      href={`mailto:${order.customerMailId || order.customerEmail}?subject=Dispatch%20Details%20Order%20${encodeURIComponent(order.orderNo || '')}&body=Dear%20Customer,%0A%0AYour%20order%20has%20been%20dispatched.`}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold text-blue-600 hover:text-blue-800 hover:underline"
+                    >
+                      <span>Send Email</span>
+                      <ExternalLink className="w-2.5 h-2.5" />
+                    </a>
+                  ) : (
+                    <span className="text-slate-400 italic">—</span>
+                  )}
+                </td>
+              )}
+            </>
+          )}
+        </tr>
+      );
+
+      rowNumber++;
+    });
+  });
+
+  return rows;
+}
+
+// MODAL COMPONENT: CREATE NEW ORDER WITH MULTIPLE ITEMS
+interface NewOrderModalProps {
+  onClose: () => void;
+  onSubmit: (orderData: any) => void;
+}
+
+const NewOrderModal: React.FC<NewOrderModalProps> = ({ onClose, onSubmit }) => {
+  const [customerPO, setCustomerPO] = useState(`PO-${Math.floor(1000 + Math.random() * 9000)}`);
+  const [customerName, setCustomerName] = useState('Manju Creation (Santacruz Mumbai)');
+  const [customerEmail, setCustomerEmail] = useState('orders@manjucreation.com');
+  const [customerNumber, setCustomerNumber] = useState('9820123456');
+  const [orderDate, setOrderDate] = useState('23/04/2026');
+  const [billingAddress, setBillingAddress] = useState('Shop 4, Station Road, Santacruz West, Mumbai, Maharashtra 400054');
+  const [deliveryAddress, setDeliveryAddress] = useState('Shop 4, Station Road, Santacruz West, Mumbai, Maharashtra 400054');
+  const [transporterName, setTransporterName] = useState('Mumbai Central Transport');
+  const [salesPerson, setSalesPerson] = useState('Santosh Pachratkar');
+  const [orderNo, setOrderNo] = useState(`MMFSO2526-0${Math.floor(1700 + Math.random() * 90)}`);
+  const [remark, setRemark] = useState('Urgent delivery Mumbai HO');
+  const [statusAN, setStatusAN] = useState<'Open' | 'In-Progress' | 'Closed'>('Open');
+
+  // Items in this order
+  const [items, setItems] = useState([
+    {
+      unit: 'ELASTIC',
+      itemName: 'N5412-18MM',
+      color: 'White',
+      width: '18 mm',
+      unitOfItem: 'MTR',
+      qty: 32000,
+      rate: 4.21,
+      discount: 0,
+      deliveryDate: '02/06/2026'
+    },
+    {
+      unit: 'ELASTIC',
+      itemName: 'N5412-25MM',
+      color: 'White',
+      width: '25 mm',
+      unitOfItem: 'MTR',
+      qty: 28000,
+      rate: 5.38,
+      discount: 0,
+      deliveryDate: '02/06/2026'
+    }
+  ]);
+
+  const handleAddItem = () => {
+    setItems([
+      ...items,
+      {
+        unit: 'ELASTIC',
+        itemName: 'N5412-10MM',
+        color: 'White',
+        width: '10 mm',
+        unitOfItem: 'MTR',
+        qty: 32000,
+        rate: 2.46,
+        discount: 0,
+        deliveryDate: '02/06/2026'
+      }
+    ]);
+  };
+
+  const handleRemoveItem = (index: number) => {
+    if (items.length <= 1) return;
+    setItems(items.filter((_, idx) => idx !== index));
+  };
+
+  const handleItemChange = (index: number, field: string, value: any) => {
+    setItems(items.map((it, idx) => idx === index ? { ...it, [field]: value } : it));
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSubmit({
+      customerPO,
+      customerName,
+      customerEmail,
+      customerNumber,
+      orderDate,
+      billingAddress,
+      deliveryAddress,
+      transporterName,
+      salesPerson,
+      orderNo,
+      remark,
+      statusAN,
+      items
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
+      <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full border border-slate-200 overflow-hidden my-8">
+        <div className="px-6 py-4 bg-slate-900 text-white flex items-center justify-between">
+          <div>
+            <h3 className="font-bold text-base flex items-center gap-2">
+              <PlusCircle className="w-5 h-5 text-emerald-400" />
+              Add Customer Order (Multi-Item Vertical Merge)
+            </h3>
+            <p className="text-xs text-slate-300">
+              Columns A–E and N–X will vertically merge across all {items.length} items entered below.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-1 text-slate-400 hover:text-white rounded-lg">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 max-h-[75vh] overflow-y-auto">
+          {/* Section 1: Order Header Fields */}
+          <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-3">
+            <span className="text-xs font-bold text-slate-700 block uppercase tracking-wider">
+              Order Header Details (Merged Columns A–E &amp; N–X)
+            </span>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Customer PO (Col B)</label>
+                <input
+                  type="text"
+                  required
+                  value={customerPO}
+                  onChange={(e) => setCustomerPO(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded font-bold"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Customer Name (Col C)</label>
+                <input
+                  type="text"
+                  required
+                  value={customerName}
+                  onChange={(e) => setCustomerName(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded font-medium"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Customer Number (Col P)</label>
+                <input
+                  type="text"
+                  value={customerNumber}
+                  onChange={(e) => setCustomerNumber(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded"
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Order Date (Col E)</label>
+                <input
+                  type="text"
+                  value={orderDate}
+                  onChange={(e) => setOrderDate(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Transporter Name (Col S)</label>
+                <input
+                  type="text"
+                  value={transporterName}
+                  onChange={(e) => setTransporterName(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Order Number (Col X)</label>
+                <input
+                  type="text"
+                  value={orderNo}
+                  onChange={(e) => setOrderNo(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded font-mono font-bold text-slate-800"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Open / Close (Col AN)</label>
+                <select
+                  value={statusAN}
+                  onChange={(e) => setStatusAN(e.target.value as any)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-sky-400 text-sky-950 font-bold rounded"
+                >
+                  <option value="Open">🔵 Open</option>
+                  <option value="In-Progress">🟡 In-Progress</option>
+                  <option value="Closed">🟢 Closed</option>
+                </select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Billing &amp; Delivery Address (Col Q &amp; R)</label>
+                <input
+                  type="text"
+                  value={billingAddress}
+                  onChange={(e) => {
+                    setBillingAddress(e.target.value);
+                    setDeliveryAddress(e.target.value);
+                  }}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded"
+                />
+              </div>
+              <div>
+                <label className="text-[11px] font-semibold text-slate-600 block mb-1">Remark (Col O)</label>
+                <input
+                  type="text"
+                  value={remark}
+                  onChange={(e) => setRemark(e.target.value)}
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Section 2: Individual Item Rows */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                Product Items ({items.length} Rows — Cols F to N)
+              </span>
+              <button
+                type="button"
+                onClick={handleAddItem}
+                className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold rounded bg-emerald-50 text-emerald-700 border border-emerald-300 hover:bg-emerald-100"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>+ Add Item Row</span>
+              </button>
+            </div>
+
+            <div className="space-y-2">
+              {items.map((it, idx) => (
+                <div key={idx} className="p-3 bg-slate-50 rounded-lg border border-slate-200 flex flex-wrap items-center gap-2 text-xs">
+                  <span className="w-5 text-center font-mono font-bold text-slate-400 text-[11px]">{idx + 1}</span>
+                  <div className="w-32">
+                    <input
+                      type="text"
+                      placeholder="Item Name (Col G)"
+                      value={it.itemName}
+                      onChange={(e) => handleItemChange(idx, 'itemName', e.target.value)}
+                      className="w-full px-2 py-1 text-xs bg-white border border-slate-300 rounded font-medium"
+                    />
+                  </div>
+                  <div className="w-20">
+                    <input
+                      type="text"
+                      placeholder="Color (Col H)"
+                      value={it.color}
+                      onChange={(e) => handleItemChange(idx, 'color', e.target.value)}
+                      className="w-full px-2 py-1 text-xs bg-white border border-slate-300 rounded"
+                    />
+                  </div>
+                  <div className="w-16">
+                    <input
+                      type="text"
+                      placeholder="Width (Col I)"
+                      value={it.width}
+                      onChange={(e) => handleItemChange(idx, 'width', e.target.value)}
+                      className="w-full px-2 py-1 text-xs bg-white border border-slate-300 rounded"
+                    />
+                  </div>
+                  <div className="w-20">
+                    <input
+                      type="number"
+                      placeholder="Qty (Col K)"
+                      value={it.qty}
+                      onChange={(e) => handleItemChange(idx, 'qty', e.target.value)}
+                      className="w-full px-2 py-1 text-xs bg-white border border-slate-300 rounded font-mono font-bold text-right"
+                    />
+                  </div>
+                  <div className="w-16">
+                    <input
+                      type="number"
+                      placeholder="Rate (Col L)"
+                      value={it.rate}
+                      onChange={(e) => handleItemChange(idx, 'rate', e.target.value)}
+                      className="w-full px-2 py-1 text-xs bg-white border border-slate-300 rounded font-mono text-right"
+                    />
+                  </div>
+                  <div className="w-24">
+                    <input
+                      type="text"
+                      placeholder="Delivery Date"
+                      value={it.deliveryDate}
+                      onChange={(e) => handleItemChange(idx, 'deliveryDate', e.target.value)}
+                      className="w-full px-2 py-1 text-xs bg-white border border-slate-300 rounded"
+                    />
+                  </div>
+                  {items.length > 1 && (
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveItem(idx)}
+                      className="p-1 text-slate-400 hover:text-rose-600 rounded ml-auto"
+                      title="Remove row"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-xs font-medium text-slate-600 hover:text-slate-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-5 py-2 text-xs font-bold bg-emerald-700 text-white rounded-lg hover:bg-emerald-800 shadow-sm"
+            >
+              Add Multi-Item Order to Sheet
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+// MODAL COMPONENT: ADD ITEM TO EXISTING ORDER
+interface AddItemModalProps {
+  order: GroupedOrder;
+  onClose: () => void;
+  onSubmit: (itemData: any) => void;
+}
+
+const AddItemModal: React.FC<AddItemModalProps> = ({ order, onClose, onSubmit }) => {
+  const [unit, setUnit] = useState('ELASTIC');
+  const [itemName, setItemName] = useState('N5412-10MM');
+  const [color, setColor] = useState('White');
+  const [width, setWidth] = useState('10 mm');
+  const [unitOfItem, setUnitOfItem] = useState('MTR');
+  const [qty, setQty] = useState(15000);
+  const [rate, setRate] = useState(2.8);
+  const [discount, setDiscount] = useState(0);
+  const [deliveryDate, setDeliveryDate] = useState('02/06/2026');
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    onSubmit({
+      unit,
+      itemName,
+      color,
+      width,
+      unitOfItem,
+      qty,
+      rate,
+      discount,
+      deliveryDate
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+      <div className="bg-white rounded-xl shadow-xl max-w-md w-full border border-slate-200 p-5 space-y-4">
+        <div className="flex items-center justify-between pb-2 border-b border-slate-100">
+          <div>
+            <h3 className="font-bold text-sm text-slate-900">Add Item to {order.customerPO}</h3>
+            <p className="text-[11px] text-slate-500">Customer: {order.customerName}</p>
+          </div>
+          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-3 text-xs">
+          <div>
+            <label className="text-[11px] font-semibold text-slate-600 block mb-1">Item Name (Col G)</label>
+            <input
+              type="text"
+              required
+              value={itemName}
+              onChange={(e) => setItemName(e.target.value)}
+              className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-medium"
+            />
+          </div>
+
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Color (Col H)</label>
+              <input
+                type="text"
+                value={color}
+                onChange={(e) => setColor(e.target.value)}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Width (Col I)</label>
+              <input
+                type="text"
+                value={width}
+                onChange={(e) => setWidth(e.target.value)}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-2">
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Qty (Col K)</label>
+              <input
+                type="number"
+                required
+                value={qty}
+                onChange={(e) => setQty(Number(e.target.value))}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono font-bold"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Rate ₹ (Col L)</label>
+              <input
+                type="number"
+                value={rate}
+                onChange={(e) => setRate(Number(e.target.value))}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono"
+              />
+            </div>
+            <div>
+              <label className="text-[11px] font-semibold text-slate-600 block mb-1">Disc % (Col M)</label>
+              <input
+                type="number"
+                value={discount}
+                onChange={(e) => setDiscount(Number(e.target.value))}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-[11px] font-semibold text-slate-600 block mb-1">Delivery Target Date (Col N)</label>
+            <input
+              type="text"
+              value={deliveryDate}
+              onChange={(e) => setDeliveryDate(e.target.value)}
+              className="w-full px-2.5 py-1.5 border border-slate-300 rounded"
+            />
+          </div>
+
+          <div className="pt-2 flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3 py-1.5 text-slate-600 hover:text-slate-800"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-1.5 font-bold bg-emerald-700 text-white rounded-lg hover:bg-emerald-800 shadow-sm"
+            >
+              Add Item Row
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
