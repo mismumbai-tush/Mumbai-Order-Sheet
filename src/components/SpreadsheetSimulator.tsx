@@ -598,6 +598,34 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   // View mode: 'merged' (Customer A-E & N-X Vertically Merged) vs 'unmerged' (Flat row-wise)
   const [viewMode, setViewMode] = useState<'merged' | 'unmerged'>('merged');
 
+  // Synced top horizontal scrollbar refs for Product Automation & Closed Orders
+  const topScrollRef = useRef<HTMLDivElement | null>(null);
+  const tableScrollRef = useRef<HTMLDivElement | null>(null);
+  const isSyncingScrollRef = useRef<'top' | 'table' | null>(null);
+  const [tableScrollWidth, setTableScrollWidth] = useState<number>(2800);
+
+  const handleTopScroll = () => {
+    if (isSyncingScrollRef.current === 'table') return;
+    if (topScrollRef.current && tableScrollRef.current) {
+      isSyncingScrollRef.current = 'top';
+      tableScrollRef.current.scrollLeft = topScrollRef.current.scrollLeft;
+      requestAnimationFrame(() => {
+        isSyncingScrollRef.current = null;
+      });
+    }
+  };
+
+  const handleTableScroll = () => {
+    if (isSyncingScrollRef.current === 'top') return;
+    if (topScrollRef.current && tableScrollRef.current) {
+      isSyncingScrollRef.current = 'table';
+      topScrollRef.current.scrollLeft = tableScrollRef.current.scrollLeft;
+      requestAnimationFrame(() => {
+        isSyncingScrollRef.current = null;
+      });
+    }
+  };
+
   // Global search filter
   const [searchTerm, setSearchTerm] = useState('');
 
@@ -2216,6 +2244,30 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     return count;
   }, [filteredOrders, safeAutomationPage, automationPageSize]);
 
+  useEffect(() => {
+    if (activeSheetTab !== 'automation' && activeSheetTab !== 'closed') return;
+    const el = tableScrollRef.current;
+    if (!el) return;
+
+    const updateWidth = () => {
+      if (el.scrollWidth > 0) {
+        setTableScrollWidth(el.scrollWidth);
+      }
+      if (topScrollRef.current) {
+        topScrollRef.current.scrollLeft = el.scrollLeft;
+      }
+    };
+
+    updateWidth();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(updateWidth) : null;
+    if (ro) ro.observe(el);
+    window.addEventListener('resize', updateWidth);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', updateWidth);
+    };
+  }, [activeSheetTab, visibleCols, viewMode, isFullWidth, statusFilter, automationPage, automationPageSize]);
+
   // Aggregate metrics
   const totalOrdersCount = groupedOrders.length;
   const closedOrdersCount = groupedOrders.filter(o => isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN))).length;
@@ -2325,7 +2377,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             }`}
           >
             <Layers className={`w-3.5 h-3.5 ${activeSheetTab === 'automation' ? 'text-emerald-200' : 'text-emerald-600'}`} />
-            <span>Product Automation (Open)</span>
+            <span>Product Automation</span>
             <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
               activeSheetTab === 'automation' ? 'bg-emerald-900 text-emerald-100' : 'bg-emerald-100 text-emerald-800'
             }`}>
@@ -2348,7 +2400,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             }`}
           >
             <Archive className={`w-3.5 h-3.5 ${activeSheetTab === 'closed' ? 'text-indigo-200' : 'text-indigo-600'}`} />
-            <span>Closed Orders (Col AM Complete)</span>
+            <span>Closed Orders</span>
             <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
               activeSheetTab === 'closed' ? 'bg-indigo-900 text-indigo-100' : 'bg-indigo-100 text-indigo-800'
             }`}>
@@ -2398,8 +2450,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
       {/* SPREADSHEET TOOLBAR & CONTROLS */}
       <div className="bg-white rounded-xl border border-slate-300 shadow-xs overflow-hidden">
-        {/* Top Control Bar - ALL IN ONE SINGLE LINE */}
-        <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 overflow-x-auto select-none scrollbar-none whitespace-nowrap">
+        {/* Top Control Bar - ALL IN ONE SINGLE LINE WITH VISIBLE HORIZONTAL SCROLL */}
+        <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 overflow-x-auto select-none fms-sheet-scroll whitespace-nowrap">
           {/* Left Controls Group in Single Line */}
           <div className="flex items-center gap-2 shrink-0">
             {/* Search Box */}
@@ -2564,6 +2616,18 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           </div>
         )}
 
+        {/* TOP HORIZONTAL SCROLLBAR BELOW UPPER MENU TOOLS (Product Automation & Closed Orders) */}
+        {(activeSheetTab === 'automation' || activeSheetTab === 'closed') && (
+          <div
+            ref={topScrollRef}
+            onScroll={handleTopScroll}
+            className="overflow-x-auto overflow-y-hidden bg-slate-100 border-b border-slate-300 fms-sheet-scroll"
+            title="Horizontal Scroll (Columns A–AQ)"
+          >
+            <div style={{ width: `${tableScrollWidth}px`, height: '2px' }} />
+          </div>
+        )}
+
         {/* THE MAIN SPREADSHEET TABLE GRID CONTAINER (Vertical & Horizontal Scroll Box with Freeze Panes) */}
         {activeSheetTab === 'product_order' ? (
           <ProductOrderView
@@ -2591,7 +2655,11 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             onOpenTwoWaySyncModal={() => setShowTwoWaySyncModal(true)}
           />
         ) : (
-          <div className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-140px)] max-h-[89vh]' : 'h-[640px] max-h-[74vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}>
+          <div
+            ref={tableScrollRef}
+            onScroll={handleTableScroll}
+            className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-140px)] max-h-[89vh]' : 'h-[640px] max-h-[74vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}
+          >
             <table className="w-full border-collapse text-xs text-left">
             {/* The Sticky Column Letters Header with Rich Fill Colors */}
             <thead className={`${freezeRows === 1 ? 'sticky top-0 z-30' : ''} select-none border-b-2 border-slate-900`}>
