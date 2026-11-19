@@ -26,7 +26,11 @@ import {
   ArrowRight,
   Columns3,
   Lock,
-  RotateCcw
+  RotateCcw,
+  Edit3,
+  Link2,
+  Loader2,
+  ArrowUpDown
 } from 'lucide-react';
 
 interface ProductOrderViewProps {
@@ -46,6 +50,9 @@ interface ProductOrderViewProps {
   isFetchingLive?: boolean;
   onOpenQueryStudio?: () => void;
   onPurgeDelhiAndLock?: () => void;
+  lastSyncedAt?: string | null;
+  webAppConfigured?: boolean;
+  onOpenTwoWaySyncModal?: () => void;
 }
 
 // Robust helper to parse order date and timestamp into year, month, day
@@ -105,13 +112,18 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
   onFetchQueryLive,
   isFetchingLive,
   onOpenQueryStudio,
-  onPurgeDelhiAndLock
+  onPurgeDelhiAndLock,
+  lastSyncedAt,
+  webAppConfigured,
+  onOpenTwoWaySyncModal
 }) => {
   const [filterPendingOnly, setFilterPendingOnly] = useState(false);
   const [filterTodayYesterdayOnly, setFilterTodayYesterdayOnly] = useState(false);
   const [selectedYear, setSelectedYear] = useState<string>('ALL');
   const [selectedMonth, setSelectedMonth] = useState<string>('ALL');
+  const [sortOrder, setSortOrder] = useState<'newest' | 'pending' | 'sheet'>('newest');
   const [inputOrderNos, setInputOrderNos] = useState<Record<string, string>>({});
+  const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showClearConfirmModal, setShowClearConfirmModal] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -155,7 +167,7 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
     const yestM = yest.getMonth() + 1;
     const yestD = yest.getDate();
 
-    return orders.filter(row => {
+    const matched = orders.filter(row => {
       // 1. Pending O.N filter
       if (filterPendingOnly && row.orderNo && row.orderNo.trim() !== '') {
         return false;
@@ -201,7 +213,32 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
       }
       return true;
     });
-  }, [orders, filterPendingOnly, filterTodayYesterdayOnly, selectedYear, selectedMonth, searchTerm]);
+
+    const rowWeight = (r: ProductOrderRow, fallbackIdx: number) => r.sheetRowIndex ?? fallbackIdx;
+
+    if (sortOrder === 'newest') {
+      return matched
+        .map((r, idx) => ({ r, w: rowWeight(r, idx) }))
+        .sort((a, b) => b.w - a.w)
+        .map(x => x.r);
+    }
+
+    if (sortOrder === 'pending') {
+      return matched
+        .map((r, idx) => ({
+          r,
+          w: rowWeight(r, idx),
+          isPend: !r.orderNo || r.orderNo.trim() === '' ? 1 : 0
+        }))
+        .sort((a, b) => {
+          if (a.isPend !== b.isPend) return b.isPend - a.isPend;
+          return b.w - a.w;
+        })
+        .map(x => x.r);
+    }
+
+    return matched;
+  }, [orders, filterPendingOnly, filterTodayYesterdayOnly, selectedYear, selectedMonth, searchTerm, sortOrder]);
 
   // Safe pagination calculation
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / (pageSize || 30)));
@@ -311,16 +348,8 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
     <div className="space-y-1.5">
       {/* Product Order Clean Action Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1 text-xs">
-        {/* Left Side: Total Rows Badge + Year Filter + Month Filter */}
+        {/* Left Side: Year Filter + Month Filter + Sort */}
         <div className="flex flex-wrap items-center gap-2">
-          {/* Prominent Total Rows Badge (Requested by user) */}
-          <div className="px-3 py-1 bg-slate-100 border border-slate-300 rounded-lg text-slate-900 font-bold text-xs flex items-center gap-1.5 shadow-2xs">
-            <span className="text-slate-500 font-medium text-[11px]">Total Rows:</span>
-            <span className="font-mono text-emerald-800 font-extrabold text-xs">
-              {filteredRows.length === orders.length ? orders.length.toLocaleString() : `${filteredRows.length.toLocaleString()} of ${orders.length.toLocaleString()}`}
-            </span>
-          </div>
-
           {/* Year Filter Dropdown */}
           <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs">
             <Calendar className="w-3.5 h-3.5 text-slate-400" />
@@ -366,20 +395,27 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
               <option value="12">Dec (12)</option>
             </select>
           </div>
+
+          {/* Sort Mode Selector */}
+          <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs">
+            <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
+            <select
+              value={sortOrder}
+              onChange={(e) => {
+                setSortOrder(e.target.value as any);
+                setCurrentPage(1);
+              }}
+              className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
+            >
+              <option value="newest">Newest Sheet Rows First</option>
+              <option value="pending">Pending Order No First</option>
+              <option value="sheet">Sheet Row Order (Old → New)</option>
+            </select>
+          </div>
         </div>
 
         {/* Right Side: Action Controls */}
-        <div className="flex items-center gap-2 ml-auto">
-          {/* Switch to Product Automation */}
-          <button
-            onClick={onNavigateToAutomation}
-            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-lg shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
-            title="Switch to Product Automation tab to view active orders grid"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            <span>Product Automation ➔</span>
-          </button>
-
+        <div className="flex flex-wrap items-center gap-2 ml-auto">
           {/* + Add Row */}
           <button
             onClick={() => setShowAddModal(true)}
@@ -491,9 +527,12 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
                     id={`order-row-${row.orderId}`}
                     className={`border-b border-slate-200 transition-colors hover:bg-sky-50/50 ${rowBgClass}`}
                   >
-                    {/* # Index Column */}
-                    <td className="w-10 px-2 py-0.5 text-center font-mono font-bold text-slate-400 bg-slate-50/90 border-r border-slate-200 text-[11px] sticky left-0 z-20">
-                      {rowIndex}
+                    {/* # Google Sheet Row Number Column */}
+                    <td
+                      className="w-10 px-2 py-0.5 text-center font-mono font-bold text-slate-500 bg-slate-50/95 border-r border-slate-200 text-[11px] sticky left-0 z-20"
+                      title={row.sheetRowIndex ? `Google Sheet Row #${row.sheetRowIndex}` : `Row ${rowIndex}`}
+                    >
+                      {row.sheetRowIndex || rowIndex}
                     </td>
 
                     {/* Col A (1): Timestamp */}
@@ -603,13 +642,24 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
                       {row.salesPersonContact || '—'}
                     </td>
 
-                    {/* Col S (19): ORDER NUMBER - (Trigger Column into Product Automation) */}
+                    {/* Col S (19): ORDER NUMBER - (Trigger Column into Product Automation & 2-Way Google Sheet Save) */}
                     <td className="px-2.5 py-0.5 border-r border-slate-300 bg-emerald-50/40 whitespace-nowrap">
-                      {hasOrderNo ? (
+                      {hasOrderNo && editingRowId !== row.orderId ? (
                         <div className="flex items-center gap-1.5">
                           <span className="font-mono font-bold text-slate-900 px-2 py-0.5 rounded bg-white border border-slate-300 shadow-2xs text-[11px]">
                             {row.orderNo}
                           </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setInputOrderNos(prev => ({ ...prev, [row.orderId]: row.orderNo || '' }));
+                              setEditingRowId(row.orderId);
+                            }}
+                            className="p-1 text-slate-500 hover:text-blue-700 hover:bg-blue-50 rounded transition-colors cursor-pointer"
+                            title="Edit Order No & sync with Google Sheet"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                          </button>
                           <span
                             onClick={onNavigateToAutomation}
                             className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-1.5 py-0.5 cursor-pointer hover:bg-emerald-200"
@@ -624,22 +674,42 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
                         <div className="flex items-center gap-1.5">
                           <input
                             type="text"
-                            placeholder="e.g. DLFSO2526-01752"
+                            placeholder="e.g. MMFSO2526-01752"
                             value={inputOrderNos[row.orderId] ?? ''}
                             onChange={(e) => setInputOrderNos({ ...inputOrderNos, [row.orderId]: e.target.value })}
-                            className="w-32 px-1.5 py-0.5 text-[11px] bg-white border border-amber-300 rounded font-mono font-semibold focus:outline-none focus:ring-1 focus:ring-amber-500"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                const manualVal = inputOrderNos[row.orderId];
+                                onGenerateOrderNo(row.orderId, manualVal);
+                                setEditingRowId(null);
+                              }
+                            }}
+                            className="w-36 px-1.5 py-0.5 text-[11px] bg-white border border-amber-300 rounded font-mono font-semibold focus:outline-none focus:ring-1 focus:ring-amber-500"
                           />
                           <button
+                            type="button"
                             onClick={() => {
                               const manualVal = inputOrderNos[row.orderId];
                               onGenerateOrderNo(row.orderId, manualVal);
+                              setEditingRowId(null);
                             }}
                             className="px-2 py-0.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded text-[10px] flex items-center gap-1 transition-colors cursor-pointer shadow-2xs"
-                            title="Assign Order No and flow to Product Automation"
+                            title="Save Order No in App + Google Sheet & flow to Product Automation"
                           >
                             <Sparkles className="w-2.5 h-2.5" />
-                            <span>Assign</span>
+                            <span>{editingRowId === row.orderId ? 'Save' : 'Assign'}</span>
                           </button>
+                          {editingRowId === row.orderId && (
+                            <button
+                              type="button"
+                              onClick={() => setEditingRowId(null)}
+                              className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                              title="Cancel edit"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          )}
                         </div>
                       )}
                     </td>

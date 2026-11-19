@@ -244,6 +244,8 @@ export const QUERY_COLUMN_MAPPINGS: QueryColumnMapping[] = [
 // Dual Google Spreadsheet IDs & Tab Configurations
 export const AUTOMATION_SPREADSHEET_ID = "1xSSZ6DyQarQJOd8UpOfCV-tjdKL1oQq_IKuXJkcRv5Q";
 export const AUTOMATION_TAB_NAME = "Product Automation";
+export const PRODUCT_ORDER_GID = "0";
+export const PRODUCT_AUTOMATION_GID = "1541274744";
 
 export const QUERY_SPREADSHEET_ID = "1TksqSeCWat_0CRRPTxA0nAMiQFtUO17xUhtqHJM2JAs";
 export const SPREADSHEET_ID = QUERY_SPREADSHEET_ID;
@@ -251,6 +253,7 @@ export const SOURCE_TAB_NAME = "Product Automation"; // Default to full 43-colum
 export const ORDERS_TAB_NAME = "Orders";
 export const PRODUCT_ORDER_TAB_NAME = "Product Order";
 export const SOURCE_RANGE = "Product Automation!A:AQ";
+export const WEB_APP_URL_STORAGE_KEY = "ginza_fms_apps_script_webapp_url_v1";
 
 // Helper: robust CSV string parser handling quoted multiline cells
 export function parseCsvRows(text: string): string[][] {
@@ -298,8 +301,20 @@ export function parseCsvRows(text: string): string[][] {
   return rows;
 }
 
+const splitLines = (val?: string): string[] => {
+  if (!val) return [];
+  return val.split(/\r?\n/).map(s => s.trim());
+};
+
+const parseNum = (val?: string): number => {
+  if (!val) return 0;
+  const cleaned = val.replace(/,/g, '').trim();
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? 0 : n;
+};
+
 // Convert CSV text from Google Sheet into ProductOrderRow[]
-// Auto-detects 43-column Product Automation layout vs 19-column Product Order layout
+// Auto-detects 43-column Product Automation layout (including multi-line item cells) vs 19-column Product Order layout
 export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOrderRow[] {
   const parsed = parseCsvRows(csvText);
   if (parsed.length <= 1) return [];
@@ -308,63 +323,25 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
   const header = parsed[0].map(h => (h || '').trim().toLowerCase());
 
   // Detect format based on column count and headers
-  const is43ColFormat = parsed[0].length >= 26 || header.some(h => h.includes('dispatch') || h.includes('balance'));
+  const is43ColFormat =
+    parsed[0].length >= 26 ||
+    header.some(h => h.includes('dispatch') || h.includes('balance') || h.includes('open / close'));
   const isRawOrdersForm = !is43ColFormat && (header[2]?.includes('customer') || header[13]?.includes('qty'));
 
   for (let i = 1; i < parsed.length; i++) {
     const r = parsed[i];
     if (!r || r.length < 2) continue;
 
-    // Check if empty line
-    if (!r.slice(0, 15).some(v => v.trim() !== '')) continue;
+    // Skip completely empty or checkbox-only trailing template rows
+    if (!r.slice(0, 19).some(v => v.trim() !== '')) continue;
+
+    const sheetRowIndex = i + 1; // 1-based Google Sheet row number (row 1 = header)
 
     if (is43ColFormat) {
-      // ==============================================================
-      // 43-COLUMN "Product Automation" LAYOUT (Columns A to AQ)
-      // Col A (0):  Timestamp
-      // Col B (1):  Customer Name
-      // Col C (2):  Order Date
-      // Col D (3):  Unit
-      // Col E (4):  Item Name
-      // Col F (5):  Color
-      // Col G (6):  Width
-      // Col H (7):  Unit (of item)
-      // Col I (8):  Qty
-      // Col J (9):  Rate
-      // Col K (10): Discount
-      // Col L (11): Delivery Date
-      // Col M (12): Remark
-      // Col N (13): Customer Number
-      // Col O (14): Billing Address
-      // Col P (15): Delivery Address
-      // Col Q (16): Sales Person Name
-      // Col R (17): Sales Person Contact
-      // Col S (18): Order No
-      // Col T (19): Customer Mail Id
-      // Col U (20): Dispatch Qnt (VALUE FROM GOOGLE SHEET FORMULA / ENTRY!)
-      // Col V (21): Balance Qnt (=I - U)
-      // Col W (22): Status (Operational / Account)
-      // Col X (23): Remark
-      // Col Y (24): Approval
-      // Col Z (25): Approval Timestamp
-      // Col AA-AJ: Confirmation & Follow-ups
-      // Col AK (36): Transport Name
-      // Col AL (37): LR- Number
-      // Col AM (38): Open / Close
-      // Col AN (39): Delivered Whatspp Msg / Status AN
-      // ==============================================================
+      // 43-COLUMN "Product Automation" LAYOUT (Cols A to AQ)
       const timestamp = (r[0] || '').trim();
       const customerName = (r[1] || '').trim();
       const orderDate = (r[2] || '').trim();
-      const unit = (r[3] || '').trim();
-      const itemName = (r[4] || '').trim();
-      const color = (r[5] || '').trim();
-      const width = (r[6] || '').trim();
-      const unitOfItem = (r[7] || '').trim();
-      const qty = parseFloat((r[8] || '').replace(/,/g, '')) || 0;
-      const rate = parseFloat((r[9] || '').replace(/,/g, '')) || 0;
-      const discount = parseFloat((r[10] || '').replace(/,/g, '')) || 0;
-      const deliveryDate = (r[11] || '').trim();
       const remark = (r[12] || '').trim();
       const customerNumber = (r[13] || '').trim();
       const billingAddress = (r[14] || '').trim();
@@ -374,78 +351,117 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
       const orderNo = (r[18] || '').trim();
       const customerMailId = (r[19] || '').trim();
 
-      // Parse Col U: Dispatch Qnt (Google Sheet formula or manual value)
-      const rawDispatch = r[20] !== undefined ? (r[20] || '').trim() : '';
-      const dispatchQty = rawDispatch ? (parseFloat(rawDispatch.replace(/,/g, '')) || 0) : 0;
+      const accountStatus = (r[22] || '').trim();        // Col W
+      const operationalRemark = (r[23] || '').trim();    // Col X
+      const approvalStatus = (r[24] || '').trim() || 'APPROVED'; // Col Y
+      const orderNoTimestamp = (r[25] || '').trim();     // Col Z
+      const confirmationMsg = (r[28] || '').trim();      // Col AC
+      const followUp1Raw = (r[30] || '').trim().toLowerCase(); // Col AE
+      const followUp1 = followUp1Raw === 'true' || followUp1Raw === '✓' || followUp1Raw === 'yes';
+      const followUp1Timestamp = (r[31] || '').trim();   // Col AF
+      const followUp1Remark = (r[32] || '').trim();      // Col AG
+      const followUp2Raw = (r[33] || '').trim().toLowerCase(); // Col AH
+      const followUp2 = followUp2Raw === 'true' || followUp2Raw === '✓' || followUp2Raw === 'yes';
+      const followUp2Timestamp = (r[34] || '').trim();   // Col AI
+      const followUp2Remark = (r[35] || '').trim();      // Col AJ
+      const transporterName = (r[36] || '').trim();      // Col AK
+      const lrNumber = (r[37] || '').trim();             // Col AL
 
-      // Parse Col V: Balance Qnt (=I - U)
-      const rawBalance = r[21] !== undefined ? (r[21] || '').trim() : '';
-      const balanceQty = rawBalance !== ''
-        ? (parseFloat(rawBalance.replace(/,/g, '')) || Math.max(0, qty - dispatchQty))
-        : Math.max(0, qty - dispatchQty);
-
-      const accountStatus = (r[22] || '').trim();
-      const operationalRemark = (r[23] || '').trim();
-      const approvalStatus = (r[24] || '').trim() || 'APPROVED';
-      const orderNoTimestamp = (r[25] || '').trim();
-      const transporterName = (r[36] || '').trim();
-      const lrNumber = (r[37] || '').trim();
-
-      // Check Col AN (39), Col AM (38), Col W (22) for Complete / Closed status
-      const colAN = (r[39] || '').trim().toLowerCase();
+      // STRICT COL AM (index 38): "Open / Close" -> Complete vs Open
       const colAM = (r[38] || '').trim().toLowerCase();
-      const colW = (r[22] || '').trim().toLowerCase();
-
-      let statusAN: 'Open' | 'In-Progress' | 'Complete' | 'Closed' = 'Open';
-      if (
-        colAN === 'complete' || colAN === 'closed' || colAN === 'done' || colAN.includes('complete') ||
-        colAM === 'complete' || colAM === 'closed' || colAM === 'done' || colAM.includes('complete') ||
-        colW === 'complete' || colW === 'closed' || colW === 'done'
-      ) {
-        statusAN = 'Complete';
-      } else if (
-        colAN.includes('progress') || colAM.includes('progress') || colW.includes('progress') ||
-        colAN.includes('partial') || colAM.includes('partial')
-      ) {
-        statusAN = 'In-Progress';
-      } else if (balanceQty <= 0 && qty > 0) {
-        // Automatic completion when balance reaches zero
-        statusAN = 'Complete';
+      let statusAM: 'Open' | 'In-Progress' | 'Complete' | 'Closed' = 'Open';
+      if (colAM === 'complete' || colAM === 'completed' || colAM === 'closed' || colAM === 'close' || colAM === 'done') {
+        statusAM = 'Complete';
+      } else if (colAM.includes('progress') || colAM.includes('partial')) {
+        statusAM = 'In-Progress';
+      } else {
+        statusAM = 'Open';
       }
 
-      results.push({
-        orderId: `ORD-AUTO-${i}`,
-        referenceNo: `REF-${i}`,
-        timestamp,
-        customerName,
-        customerNumber,
-        customerEmail: customerMailId,
-        customerMailId,
-        billingAddress,
-        deliveryAddress,
-        salesPerson,
-        salesPersonContact,
-        orderDate,
-        unit,
-        itemName,
-        color,
-        width,
-        unitOfItem: unitOfItem || 'MTR',
-        qty,
-        rate,
-        discount,
-        deliveryDate,
-        remark: remark || operationalRemark,
-        orderNo,
-        orderNoTimestamp: orderNoTimestamp || (orderNo ? timestamp : ''),
-        accountStatus,
-        approvalStatus,
-        transporterName,
-        lrNumber,
-        statusAN,
-        dispatchQty,
-        balanceQty
-      });
+      // Col AN (index 39): Delivered WhatsApp Msg ("Sent" / "Message Sent" / "")
+      const rawAN = (r[39] || '').trim();
+      const deliveredWhatsappMsg = rawAN.toLowerCase() === 'sent' ? 'Message Sent' : (rawAN || 'Pending');
+      const deliveryEmail = (r[41] || '').trim();        // Col AP
+
+      // Multi-line item cells (Cols D..L, U, V)
+      const units = splitLines(r[3]);
+      const items = splitLines(r[4]);
+      const colors = splitLines(r[5]);
+      const widths = splitLines(r[6]);
+      const uoms = splitLines(r[7]);
+      const qtys = splitLines(r[8]);
+      const rates = splitLines(r[9]);
+      const discounts = splitLines(r[10]);
+      const delivDates = splitLines(r[11]);
+      const dispatches = splitLines(r[20]);
+      const balances = splitLines(r[21]);
+
+      const lineCount = Math.max(1, items.length, qtys.length);
+      const orderGroupKey = `PA_R${sheetRowIndex}_${orderNo || timestamp}_${customerName}`;
+
+      for (let lineIdx = 0; lineIdx < lineCount; lineIdx++) {
+        const unit = units[lineIdx] ?? units[0] ?? '';
+        const itemName = items[lineIdx] ?? items[0] ?? '';
+        const color = colors[lineIdx] ?? colors[0] ?? '';
+        const width = widths[lineIdx] ?? widths[0] ?? '';
+        const unitOfItem = uoms[lineIdx] ?? uoms[0] ?? 'MTR';
+        const qty = parseNum(qtys[lineIdx] ?? qtys[0]);
+        const rate = parseNum(rates[lineIdx] ?? rates[0]);
+        const discount = parseNum(discounts[lineIdx] ?? discounts[0]);
+        const deliveryDate = delivDates[lineIdx] ?? delivDates[0] ?? '';
+
+        const rawDispStr = dispatches[lineIdx] !== undefined ? dispatches[lineIdx] : (lineCount === 1 ? dispatches[0] : '');
+        const dispatchQty = parseNum(rawDispStr);
+
+        const rawBalStr = balances[lineIdx] !== undefined ? balances[lineIdx] : (lineCount === 1 ? balances[0] : '');
+        const balanceQty = rawBalStr !== '' ? parseNum(rawBalStr) : Number((qty - dispatchQty).toFixed(4));
+
+        results.push({
+          orderId: `ORD-AUTO-${sheetRowIndex}-${lineIdx + 1}`,
+          referenceNo: `ROW-${sheetRowIndex}`,
+          sheetRowIndex,
+          orderGroupKey,
+          timestamp,
+          customerName,
+          customerNumber,
+          customerEmail: customerMailId,
+          customerMailId,
+          billingAddress,
+          deliveryAddress,
+          salesPerson,
+          salesPersonContact,
+          orderDate,
+          unit,
+          itemName,
+          color,
+          width,
+          unitOfItem: unitOfItem || 'MTR',
+          qty,
+          rate,
+          discount,
+          deliveryDate,
+          remark: remark || operationalRemark,
+          operationalRemark,
+          orderNo,
+          orderNoTimestamp: orderNoTimestamp || (orderNo ? timestamp : ''),
+          accountStatus,
+          approvalStatus,
+          transporterName,
+          lrNumber,
+          confirmationMsg,
+          followUp1,
+          followUp1Timestamp,
+          followUp1Remark,
+          followUp2,
+          followUp2Timestamp,
+          followUp2Remark,
+          deliveredWhatsappMsg,
+          deliveryEmail,
+          statusAN: statusAM,
+          dispatchQty,
+          balanceQty
+        });
+      }
     } else if (isRawOrdersForm) {
       // Raw Google Form "Orders!A:R" layout
       const timestamp = (r[0] || '').trim();
@@ -461,16 +477,17 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
       const color = (r[10] || '').trim();
       const width = (r[11] || '').trim();
       const unitOfItem = (r[12] || '').trim();
-      const qty = parseFloat((r[13] || '').replace(/,/g, '')) || 0;
-      const rate = parseFloat((r[14] || '').replace(/,/g, '')) || 0;
-      const discount = parseFloat((r[15] || '').replace(/,/g, '')) || 0;
+      const qty = parseNum(r[13]);
+      const rate = parseNum(r[14]);
+      const discount = parseNum(r[15]);
       const deliveryDate = (r[16] || '').trim();
       const remark = (r[17] || '').trim();
       const orderNo = (r[18] || '').trim();
 
       results.push({
-        orderId: `ORD-Q-${i}`,
-        referenceNo: `REF-${i}`,
+        orderId: `ORD-Q-${sheetRowIndex}`,
+        referenceNo: `ROW-${sheetRowIndex}`,
+        sheetRowIndex,
         timestamp,
         customerName,
         customerNumber,
@@ -505,9 +522,9 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
       const color = (r[5] || '').trim();
       const width = (r[6] || '').trim();
       const unitOfItem = (r[7] || '').trim();
-      const qty = parseFloat((r[8] || '').replace(/,/g, '')) || 0;
-      const rate = parseFloat((r[9] || '').replace(/,/g, '')) || 0;
-      const discount = parseFloat((r[10] || '').replace(/,/g, '')) || 0;
+      const qty = parseNum(r[8]);
+      const rate = parseNum(r[9]);
+      const discount = parseNum(r[10]);
       const deliveryDate = (r[11] || '').trim();
       const remark = (r[12] || '').trim();
       const customerNumber = (r[13] || '').trim();
@@ -518,8 +535,9 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
       const orderNo = (r[18] || '').trim();
 
       results.push({
-        orderId: `ORD-PO-${i}`,
-        referenceNo: `REF-${i}`,
+        orderId: `ORD-PO-${sheetRowIndex}`,
+        referenceNo: `ROW-${sheetRowIndex}`,
+        sheetRowIndex,
         timestamp,
         customerName,
         customerNumber,
@@ -550,41 +568,91 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
   return results;
 }
 
+// Fetch CSV using Google Export endpoint (preserves all rows & multi-line cells) with gviz fallback
+async function fetchSheetCsvByGidOrName(
+  sheetId: string,
+  gid?: string,
+  tabName?: string
+): Promise<string | null> {
+  const urls: string[] = [];
+  if (gid !== undefined && gid !== '') {
+    urls.push(`https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`);
+  }
+  if (tabName) {
+    urls.push(`https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`);
+  }
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) continue;
+      const txt = await res.text();
+      if (!txt || txt.startsWith('<!DOCTYPE html>') || txt.includes('<html')) continue;
+      return txt;
+    } catch (e) {
+      // try next URL
+    }
+  }
+  return null;
+}
+
+// Fetch BOTH "Product Order" (gid=0) AND "Product Automation" (gid=1541274744) live in parallel!
+export async function fetchBothLiveGoogleSheets(
+  sheetId: string = AUTOMATION_SPREADSHEET_ID
+): Promise<{
+  productOrderRows: ProductOrderRow[];
+  automationRows: ProductOrderRow[];
+  source: 'live' | 'snapshot';
+  fetchedAt: string;
+}> {
+  const [poCsv, paCsv] = await Promise.all([
+    fetchSheetCsvByGidOrName(sheetId, PRODUCT_ORDER_GID, PRODUCT_ORDER_TAB_NAME),
+    fetchSheetCsvByGidOrName(sheetId, PRODUCT_AUTOMATION_GID, AUTOMATION_TAB_NAME)
+  ]);
+
+  const parsedPO = poCsv ? transformOrdersCsvToProductOrderRows(poCsv) : [];
+  const parsedPA = paCsv ? transformOrdersCsvToProductOrderRows(paCsv) : [];
+
+  if (parsedPO.length > 0 || parsedPA.length > 0) {
+    const staticRows = (staticQueryOrders as any[]) as ProductOrderRow[];
+    return {
+      productOrderRows: parsedPO.length > 0 ? parsedPO : staticRows,
+      automationRows: parsedPA,
+      source: 'live',
+      fetchedAt: new Date().toLocaleTimeString('en-IN', { hour12: true })
+    };
+  }
+
+  const staticRows = (staticQueryOrders as any[]) as ProductOrderRow[];
+  return {
+    productOrderRows: staticRows,
+    automationRows: [],
+    source: 'snapshot',
+    fetchedAt: new Date().toLocaleTimeString('en-IN', { hour12: true })
+  };
+}
+
 // Fetch live from Google Sheet (supports both Product Automation 43-cols and Product Order)
 export async function fetchLiveGoogleQueryData(
   sheetId: string = AUTOMATION_SPREADSHEET_ID,
   tabName: string = AUTOMATION_TAB_NAME
 ): Promise<{ rows: ProductOrderRow[]; source: 'live' | 'snapshot'; totalCount: number; fetchedAt: string; sheetTab: string }> {
-  // Try fetching the requested sheet tab first
-  const candidateUrls = [
-    `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`,
-    // Fallback to alternative sheet ID or tab name
-    `https://docs.google.com/spreadsheets/d/${AUTOMATION_SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=Product%20Automation`,
-    `https://docs.google.com/spreadsheets/d/${QUERY_SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet=Orders`
-  ];
+  const isProductOrderTab = tabName.toLowerCase().includes('product order');
+  const gid = sheetId === AUTOMATION_SPREADSHEET_ID
+    ? (isProductOrderTab ? PRODUCT_ORDER_GID : PRODUCT_AUTOMATION_GID)
+    : undefined;
 
-  for (const url of candidateUrls) {
-    try {
-      const res = await fetch(url, { cache: 'no-store' });
-      if (!res.ok) continue;
-
-      const csvText = await res.text();
-      if (!csvText || csvText.startsWith('<!DOCTYPE html>') || csvText.includes('<html')) {
-        continue;
-      }
-
-      const rows = transformOrdersCsvToProductOrderRows(csvText);
-      if (rows.length > 0) {
-        return {
-          rows,
-          source: 'live',
-          totalCount: rows.length,
-          fetchedAt: new Date().toLocaleTimeString('en-IN', { hour12: true }),
-          sheetTab: tabName
-        };
-      }
-    } catch (e) {
-      // Continue to next candidate URL
+  const csvText = await fetchSheetCsvByGidOrName(sheetId, gid, tabName);
+  if (csvText) {
+    const rows = transformOrdersCsvToProductOrderRows(csvText);
+    if (rows.length > 0) {
+      return {
+        rows,
+        source: 'live',
+        totalCount: rows.length,
+        fetchedAt: new Date().toLocaleTimeString('en-IN', { hour12: true }),
+        sheetTab: tabName
+      };
     }
   }
 
@@ -598,4 +666,54 @@ export async function fetchLiveGoogleQueryData(
     fetchedAt: new Date().toLocaleTimeString('en-IN', { hour12: true }),
     sheetTab: 'Snapshot'
   };
+}
+
+export interface SheetWritePayload {
+  action: 'updateOrderNo' | 'updateDispatchQty' | 'updateStatusAM' | 'addOrderRow';
+  sheetRowIndex?: number;
+  timestamp?: string;
+  customerName?: string;
+  itemName?: string;
+  orderNo?: string;
+  dispatchQty?: number;
+  statusAM?: string;
+  rowData?: Partial<ProductOrderRow>;
+}
+
+// Push write-back updates from App -> Google Sheet via Apps Script Web App
+export async function pushOrderUpdateToGoogleSheet(
+  webAppUrl: string,
+  payload: SheetWritePayload
+): Promise<{ ok: boolean; message: string }> {
+  if (!webAppUrl || !webAppUrl.trim().startsWith('https://script.google.com/')) {
+    return { ok: false, message: 'Apps Script Web App URL not configured.' };
+  }
+
+  try {
+    // text/plain avoids CORS preflight on Google Apps Script Web Apps
+    const res = await fetch(webAppUrl.trim(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) {
+      return { ok: false, message: `Google Apps Script returned HTTP ${res.status}` };
+    }
+
+    try {
+      const data = await res.json();
+      return {
+        ok: data.status === 'success' || data.ok === true,
+        message: data.message || 'Saved to Google Sheet!'
+      };
+    } catch {
+      return { ok: true, message: 'Synced to Google Sheet!' };
+    }
+  } catch (err: any) {
+    return {
+      ok: false,
+      message: err?.message || 'Network error while writing to Google Sheet.'
+    };
+  }
 }

@@ -17,7 +17,9 @@ import {
   ExternalLink,
   ShieldCheck,
   Terminal,
-  HelpCircle
+  HelpCircle,
+  Settings,
+  ChevronDown
 } from 'lucide-react';
 
 interface HeaderProps {
@@ -64,6 +66,7 @@ export const Header: React.FC<HeaderProps> = ({
   });
 
   const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [showSettingsMenu, setShowSettingsMenu] = useState(false);
   const [showConnectedUsersModal, setShowConnectedUsersModal] = useState(false);
   const [showVercelFixModal, setShowVercelFixModal] = useState(false);
   const [newInviteEmail, setNewInviteEmail] = useState('');
@@ -160,20 +163,164 @@ export const Header: React.FC<HeaderProps> = ({
           <div className="flex items-center justify-between gap-3 h-11">
             {/* Zone 1: Wordmark & Logo */}
             <div className="flex items-center gap-2 shrink-0">
-              <div className="w-6 h-6 rounded bg-emerald-700 flex items-center justify-center text-white font-bold shadow-2xs">
-                <FileSpreadsheet className="w-3.5 h-3.5" />
-              </div>
-              <span className="text-sm font-bold tracking-tight text-slate-900 whitespace-nowrap">
-                GINZA FMS
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('simulator');
+                  setShowSettingsMenu(false);
+                }}
+                className="flex items-center gap-2 hover:opacity-90 transition-opacity cursor-pointer"
+                title="Back to Sheet Workspace"
+              >
+                <div className="w-6 h-6 rounded bg-emerald-700 flex items-center justify-center text-white font-bold shadow-2xs">
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                </div>
+                <span className="text-sm font-bold tracking-tight text-slate-900 whitespace-nowrap">
+                  GINZA FMS
+                </span>
+              </button>
+              <span className="hidden xl:inline-block text-[10px] font-semibold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+                Live Sheet Sync
               </span>
-              <span className="text-[10px] font-semibold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
-                Vercel &amp; GitHub Ready
-              </span>
+              {activeTab !== 'simulator' && (
+                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                  {activeTab === 'firebase' && 'Firebase Sync'}
+                  {activeTab === 'advisor' && 'Supabase SQL'}
+                  {activeTab === 'code' && 'GAS Code'}
+                  {activeTab === 'columns' && 'Column Map'}
+                  {activeTab === 'guide' && 'Setup Guide'}
+                </span>
+              )}
             </div>
 
-            {/* Zone 3: Actions & Full Size Toggle */}
+            {/* Zone 2 & 3: Settings Menu, Full Size Toggle & Google User Profile */}
             <div className="flex items-center gap-2 shrink-0">
-              {/* Full Size ON / OFF Button (Replaces Copy Script in Header as requested) */}
+              {/* Settings Dropdown Menu */}
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowSettingsMenu(prev => !prev);
+                    setShowProfileMenu(false);
+                  }}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg border transition-all whitespace-nowrap shadow-xs cursor-pointer ${
+                    activeTab !== 'simulator' || showSettingsMenu
+                      ? 'bg-slate-900 text-white border-slate-900'
+                      : 'bg-white hover:bg-slate-100 text-slate-800 border-slate-300'
+                  }`}
+                  title="Workspace & Configuration Settings"
+                >
+                  <Settings className="w-3.5 h-3.5" />
+                  <span>Settings</span>
+                  <ChevronDown className={`w-3.5 h-3.5 transition-transform ${showSettingsMenu ? 'rotate-180' : ''}`} />
+                </button>
+
+                {showSettingsMenu && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setShowSettingsMenu(false)}
+                    />
+                    <div className="absolute right-0 mt-1.5 w-56 bg-white rounded-xl shadow-xl border border-slate-200 p-1.5 z-50 text-xs space-y-0.5">
+                      <div className="px-2.5 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100 mb-1">
+                        Workspace Settings
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('simulator');
+                          setShowSettingsMenu(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-2 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                          activeTab === 'simulator'
+                            ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                            : 'text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                        <span>Sheet Workspace</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('firebase');
+                          setShowSettingsMenu(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-2 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                          activeTab === 'firebase'
+                            ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                            : 'text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <Flame className="w-4 h-4 text-amber-600" />
+                        <span>Firebase Sync</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('advisor');
+                          setShowSettingsMenu(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-2 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                          activeTab === 'advisor'
+                            ? 'bg-indigo-50 text-indigo-800 border border-indigo-200'
+                            : 'text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <Database className="w-4 h-4 text-indigo-600" />
+                        <span>Supabase SQL</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('code');
+                          setShowSettingsMenu(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-2 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                          activeTab === 'code'
+                            ? 'bg-slate-100 text-slate-900 border border-slate-300'
+                            : 'text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <FileCode2 className="w-4 h-4 text-slate-700" />
+                        <span>GAS Code</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('columns');
+                          setShowSettingsMenu(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-2 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                          activeTab === 'columns'
+                            ? 'bg-slate-100 text-slate-900 border border-slate-300'
+                            : 'text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <Zap className="w-4 h-4 text-sky-600" />
+                        <span>Column Map</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveTab('guide');
+                          setShowSettingsMenu(false);
+                        }}
+                        className={`w-full text-left px-2.5 py-2 rounded-lg font-semibold flex items-center gap-2 transition-colors cursor-pointer ${
+                          activeTab === 'guide'
+                            ? 'bg-slate-100 text-slate-900 border border-slate-300'
+                            : 'text-slate-700 hover:bg-slate-50'
+                        }`}
+                      >
+                        <HelpCircle className="w-4 h-4 text-teal-600" />
+                        <span>Setup Guide</span>
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Full Size ON / OFF Button */}
               <button
                 onClick={() => setIsFullWidth(!isFullWidth)}
                 className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg transition-all whitespace-nowrap shadow-xs cursor-pointer ${
@@ -190,8 +337,11 @@ export const Header: React.FC<HeaderProps> = ({
               {/* GOOGLE USER PROFILE */}
               <div className="relative">
                 <button
-                  onClick={() => setShowProfileMenu(!showProfileMenu)}
-                  className="flex items-center gap-1.5 p-1 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors text-left"
+                  onClick={() => {
+                    setShowProfileMenu(!showProfileMenu);
+                    setShowSettingsMenu(false);
+                  }}
+                  className="flex items-center gap-1.5 p-1 rounded-lg border border-slate-200 hover:bg-slate-50 transition-colors text-left cursor-pointer"
                 >
                   <div className="w-6 h-6 rounded-full bg-emerald-600 text-white flex items-center justify-center font-bold text-xs shadow-2xs">
                     {currentUser.name.charAt(0)}
@@ -203,39 +353,51 @@ export const Header: React.FC<HeaderProps> = ({
 
                 {/* Profile Dropdown */}
                 {showProfileMenu && (
-                  <div className="absolute right-0 mt-1 w-64 bg-white rounded-xl shadow-xl border border-slate-200 p-3 z-50 text-xs space-y-2">
-                    <div className="pb-2 border-b border-slate-100">
-                      <div className="flex items-center gap-2">
-                        <div className="w-8 h-8 rounded-full bg-emerald-700 text-white flex items-center justify-center font-bold text-sm">
-                          {currentUser.name.charAt(0)}
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setShowProfileMenu(false)}
+                    />
+                    <div className="absolute right-0 mt-1 w-64 bg-white rounded-xl shadow-xl border border-slate-200 p-3 z-50 text-xs space-y-2">
+                      <div className="pb-2 border-b border-slate-100">
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-full bg-emerald-700 text-white flex items-center justify-center font-bold text-sm">
+                            {currentUser.name.charAt(0)}
+                          </div>
+                          <div>
+                            <div className="font-bold text-slate-900">{currentUser.name}</div>
+                            <div className="text-[11px] text-slate-500 font-mono truncate">{currentUser.email}</div>
+                          </div>
                         </div>
-                        <div>
-                          <div className="font-bold text-slate-900">{currentUser.name}</div>
-                          <div className="text-[11px] text-slate-500 font-mono truncate">{currentUser.email}</div>
+                        <div className="mt-2 flex items-center justify-between text-[11px] bg-slate-50 p-1.5 rounded border border-slate-100">
+                          <span className="text-slate-500">Branch:</span>
+                          <span className="font-semibold text-slate-800">{currentUser.branch}</span>
                         </div>
                       </div>
-                      <div className="mt-2 flex items-center justify-between text-[11px] bg-slate-50 p-1.5 rounded border border-slate-100">
-                        <span className="text-slate-500">Branch:</span>
-                        <span className="font-semibold text-slate-800">{currentUser.branch}</span>
-                      </div>
+
+                      <button
+                        onClick={() => {
+                          setShowConnectedUsersModal(true);
+                          setShowProfileMenu(false);
+                        }}
+                        className="w-full text-left px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-50 rounded font-medium flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Users className="w-3.5 h-3.5 text-emerald-600" />
+                        <span>View All Connected IDs ({connectedUsers.length})</span>
+                      </button>
+
+                      <button
+                        onClick={() => {
+                          setShowVercelFixModal(true);
+                          setShowProfileMenu(false);
+                        }}
+                        className="w-full text-left px-2 py-1.5 text-xs text-amber-700 hover:bg-amber-50 rounded font-medium flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Terminal className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Vercel Build Fix Guide</span>
+                      </button>
                     </div>
-
-                    <button
-                      onClick={() => setShowConnectedUsersModal(true)}
-                      className="w-full text-left px-2 py-1.5 text-xs text-slate-700 hover:bg-slate-50 rounded font-medium flex items-center gap-1.5"
-                    >
-                      <Users className="w-3.5 h-3.5 text-emerald-600" />
-                      <span>View All Connected IDs ({connectedUsers.length})</span>
-                    </button>
-
-                    <button
-                      onClick={() => setShowVercelFixModal(true)}
-                      className="w-full text-left px-2 py-1.5 text-xs text-amber-700 hover:bg-amber-50 rounded font-medium flex items-center gap-1.5"
-                    >
-                      <Terminal className="w-3.5 h-3.5 text-amber-600" />
-                      <span>Vercel Build Fix Guide</span>
-                    </button>
-                  </div>
+                  </>
                 )}
               </div>
             </div>

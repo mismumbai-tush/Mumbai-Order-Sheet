@@ -2,15 +2,27 @@ import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { GroupedOrder, ProductOrderRow, OrderItem } from '../types/fms';
 import { initialRawResponses, initialExistingDispatch, fmsColumnMapping, productOrderColumns } from '../data/sampleOrders';
 import { ProductOrderView } from './ProductOrderView';
-import { saveOrdersToStorage, loadOrdersFromStorage, clearOrdersFromStorage, purgeAllLegacyStorageAndCaches, hasDelhiDummyData } from '../utils/orderStorage';
+import {
+  saveOrdersToStorage,
+  loadOrdersFromStorage,
+  saveAutomationOrdersToStorage,
+  loadAutomationOrdersFromStorage,
+  clearOrdersFromStorage,
+  purgeAllLegacyStorageAndCaches,
+  hasDelhiDummyData
+} from '../utils/orderStorage';
 import staticQueryOrders from '../data/ordersQueryData.json';
 import {
   AUTOMATION_SPREADSHEET_ID,
   AUTOMATION_TAB_NAME,
   QUERY_SPREADSHEET_ID,
   SOURCE_TAB_NAME as QUERY_SOURCE_TAB_NAME,
-  fetchLiveGoogleQueryData
+  WEB_APP_URL_STORAGE_KEY,
+  fetchLiveGoogleQueryData,
+  fetchBothLiveGoogleSheets,
+  pushOrderUpdateToGoogleSheet
 } from '../utils/googleQueryFetcher';
+import { generateTwoWayWebAppCode, defaultGasConfig } from '../utils/gasGenerator';
 import {
   RotateCcw,
   PlusCircle,
@@ -62,7 +74,9 @@ import {
   Loader2,
   Link2,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  RefreshCw,
+  Radio
 } from 'lucide-react';
 
 const LOCAL_STORAGE_KEY = 'ginza_fms_query_orders_v16_locked';
@@ -89,6 +103,16 @@ export const isItemComplete = (status?: string): boolean => {
   return s === 'closed' || s === 'complete' || s === 'completed' || s === 'done';
 };
 
+// Build consistent orderGroupKey across Product Order & Product Automation
+const buildOrderGroupKey = (row: ProductOrderRow): string => {
+  if (row.orderGroupKey) return row.orderGroupKey;
+  return [
+    row.orderNo || row.customerPO || '',
+    row.customerName || '',
+    row.orderDate || ''
+  ].map(v => v.trim()).join('_');
+};
+
 interface SpreadsheetSimulatorProps {
   isFullWidth?: boolean;
   setIsFullWidth?: (val: boolean) => void;
@@ -101,8 +125,21 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   onOpenQueryStudio
 }) => {
   const [isFetchingQueryLive, setIsFetchingQueryLive] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
+  const [liveSyncSource, setLiveSyncSource] = useState<'live' | 'snapshot' | 'cached'>('cached');
+  const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(true);
+  const [webAppUrl, setWebAppUrl] = useState<string>(() => {
+    try {
+      return localStorage.getItem(WEB_APP_URL_STORAGE_KEY) || '';
+    } catch {
+      return '';
+    }
+  });
+  const [showTwoWaySyncModal, setShowTwoWaySyncModal] = useState(false);
+  const [copiedWebAppScript, setCopiedWebAppScript] = useState(false);
+  const [testingWebApp, setTestingWebApp] = useState(false);
 
-  // Load saved orders from localStorage or fallback to Google Sheet Query orders
+  // Dataset 1: "Product Order" tab (Cols A to S, gid=0)
   const [rawResponses, setRawResponses] = useState<ProductOrderRow[]>(() => {
     try {
       const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
@@ -120,31 +157,181 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       : initialRawResponses;
   });
 
-  // Load larger datasets from IndexedDB on initial mount & proactively purge legacy Delhi cache
+  // Dataset 2: "Product Automation" + "Closed Orders" tabs (Cols A to AQ, gid=1541274744)
+  const [automationRows, setAutomationRows] = useState<ProductOrderRow[]>([]);
+
+  const rawResponsesRef = useRef(rawResponses);
+  rawResponsesRef.current = rawResponses;
+  const automationRowsRef = useRef(automationRows);
+  automationRowsRef.current = automationRows;
+
+  // Hydrate operational columns (W..AN, U Dispatch) from Product Automation sheet rows
+  const hydrateFromAutomationRows = (rows: ProductOrderRow[], resetStale = false) => {
+    const nextW: Record<string, string> = {};
+    const nextX: Record<string, string> = {};
+    const nextAC: Record<string, string> = {};
+    const nextAE: Record<string, boolean> = {};
+    const nextAF: Record<string, string> = {};
+    const nextAG: Record<string, string> = {};
+    const nextAH: Record<string, boolean> = {};
+    const nextAI: Record<string, string> = {};
+    const nextAJ: Record<string, string> = {};
+    const nextAL: Record<string, string> = {};
+    const nextAN: Record<string, string> = {};
+    const nextDispatch: Record<string, number> = {};
+
+    rows.forEach(row => {
+      const gk = buildOrderGroupKey(row);
+      if (row.accountStatus) nextW[gk] = row.accountStatus;
+      if (row.operationalRemark) nextX[gk] = row.operationalRemark;
+      if (row.confirmationMsg) nextAC[gk] = row.confirmationMsg;
+      if (row.followUp1 !== undefined) nextAE[gk] = Boolean(row.followUp1);
+      if (row.followUp1Timestamp) nextAF[gk] = row.followUp1Timestamp;
+      if (row.followUp1Remark) nextAG[gk] = row.followUp1Remark;
+      if (row.followUp2 !== undefined) nextAH[gk] = Boolean(row.followUp2);
+      if (row.followUp2Timestamp) nextAI[gk] = row.followUp2Timestamp;
+      if (row.followUp2Remark) nextAJ[gk] = row.followUp2Remark;
+      if (row.lrNumber) nextAL[gk] = row.lrNumber;
+      if (row.deliveredWhatsappMsg) nextAN[gk] = row.deliveredWhatsappMsg;
+
+      const itemKey = `${gk}___${(row.itemName || '').trim()}___${(row.color || '').trim()}___${(row.width || '').trim()}`;
+      if (row.dispatchQty !== undefined && row.dispatchQty > 0) {
+        nextDispatch[itemKey] = row.dispatchQty;
+      }
+    });
+
+    if (resetStale) {
+      if (Object.keys(nextW).length > 0) setColWStatuses(prev => ({ ...prev, ...nextW }));
+      if (Object.keys(nextX).length > 0) setColXRemarks(prev => ({ ...prev, ...nextX }));
+      if (Object.keys(nextAC).length > 0) setAcStatuses(prev => ({ ...prev, ...nextAC }));
+      if (Object.keys(nextAE).length > 0) setColAEChecks(prev => ({ ...prev, ...nextAE }));
+      if (Object.keys(nextAF).length > 0) setColAFTimestamps(prev => ({ ...prev, ...nextAF }));
+      if (Object.keys(nextAG).length > 0) setColAGRemarks(prev => ({ ...prev, ...nextAG }));
+      if (Object.keys(nextAH).length > 0) setColAHChecks(prev => ({ ...prev, ...nextAH }));
+      if (Object.keys(nextAI).length > 0) setColAITimestamps(prev => ({ ...prev, ...nextAI }));
+      if (Object.keys(nextAJ).length > 0) setColAJRemarks(prev => ({ ...prev, ...nextAJ }));
+      if (Object.keys(nextAL).length > 0) setLrNumbers(prev => ({ ...prev, ...nextAL }));
+      if (Object.keys(nextAN).length > 0) setAnStatuses(prev => ({ ...prev, ...nextAN }));
+      setDispatchRecords(prev => ({ ...prev, ...nextDispatch }));
+    }
+  };
+
+  // Sync BOTH "Product Order" & "Product Automation" live from Google Sheet
+  const handleSyncBothLiveSheets = async (silent = false) => {
+    setIsFetchingQueryLive(true);
+    if (!silent) {
+      setSyncFeedback(`⚡ Syncing live Google Sheets ("Product Order" & "Product Automation")...`);
+    }
+    try {
+      const res = await fetchBothLiveGoogleSheets(AUTOMATION_SPREADSHEET_ID);
+
+      // 1. Merge Product Order (preserve locally assigned Order No where sheet Col S is still blank)
+      if (res.productOrderRows && res.productOrderRows.length > 0) {
+        const localAssignedMap = new Map<string, { orderNo: string; orderNoTimestamp?: string }>();
+        rawResponsesRef.current.forEach(r => {
+          if (r.orderNo && r.orderNo.trim() !== '') {
+            const fp = `${(r.timestamp || '').trim()}___${(r.customerName || '').trim().toLowerCase()}___${(r.itemName || '').trim().toLowerCase()}`;
+            localAssignedMap.set(fp, { orderNo: r.orderNo, orderNoTimestamp: r.orderNoTimestamp });
+          }
+        });
+
+        const mergedPO = res.productOrderRows.map(remoteRow => {
+          if (!remoteRow.orderNo || remoteRow.orderNo.trim() === '') {
+            const fp = `${(remoteRow.timestamp || '').trim()}___${(remoteRow.customerName || '').trim().toLowerCase()}___${(remoteRow.itemName || '').trim().toLowerCase()}`;
+            const localMatch = localAssignedMap.get(fp);
+            if (localMatch) {
+              return {
+                ...remoteRow,
+                orderNo: localMatch.orderNo,
+                orderNoTimestamp: localMatch.orderNoTimestamp || remoteRow.orderNoTimestamp
+              };
+            }
+          }
+          return remoteRow;
+        });
+
+        setRawResponses(mergedPO);
+        saveOrdersToStorage(mergedPO);
+      }
+
+      // 2. Merge Product Automation (keep newly assigned local orders not yet copied to PA sheet)
+      if (res.automationRows && res.automationRows.length > 0) {
+        const remoteOrderNos = new Set(
+          res.automationRows
+            .map(r => (r.orderNo || '').trim().toLowerCase())
+            .filter(Boolean)
+        );
+        const localOnlyOrders = automationRowsRef.current.filter(
+          r => r.orderNo && r.orderNo.trim() !== '' && !remoteOrderNos.has(r.orderNo.trim().toLowerCase())
+        );
+
+        const mergedPA = [...res.automationRows, ...localOnlyOrders];
+        setAutomationRows(mergedPA);
+        saveAutomationOrdersToStorage(mergedPA);
+        hydrateFromAutomationRows(res.automationRows, true);
+      }
+
+      setLastSyncedAt(res.fetchedAt);
+      setLiveSyncSource(res.source);
+
+      if (!silent) {
+        const openCount = res.automationRows.filter(r => !isItemComplete(r.statusAN)).length;
+        const completeCount = res.automationRows.filter(r => isItemComplete(r.statusAN)).length;
+        setSyncFeedback(
+          `✓ Live Google Sheet synced at ${res.fetchedAt} | Product Order: ${res.productOrderRows.length.toLocaleString()} rows | Automation Open: ${openCount} | Closed (AM Complete): ${completeCount}`
+        );
+      }
+    } catch (err: any) {
+      console.error('Failed to sync live sheets:', err);
+      if (!silent) {
+        setSyncFeedback(`Live sync warning: ${err?.message || 'Check network connection'}`);
+      }
+    } finally {
+      setIsFetchingQueryLive(false);
+      if (!silent) {
+        setTimeout(() => setSyncFeedback(null), 5000);
+      }
+    }
+  };
+
+  // Load cached IndexedDB datasets on mount & immediately pull fresh live Google Sheets
   useEffect(() => {
     purgeAllLegacyStorageAndCaches();
 
     loadOrdersFromStorage().then((saved) => {
       if (saved && Array.isArray(saved) && saved.length > 0 && !hasDelhiDummyData(saved)) {
         setRawResponses(saved);
-      } else if ((staticQueryOrders as any[])?.length > 0) {
-        setRawResponses(staticQueryOrders as any);
-        saveOrdersToStorage(staticQueryOrders as any);
       }
     });
+
+    loadAutomationOrdersFromStorage().then((savedAuto) => {
+      if (savedAuto && Array.isArray(savedAuto) && savedAuto.length > 0) {
+        setAutomationRows(savedAuto);
+        hydrateFromAutomationRows(savedAuto, true);
+      }
+    });
+
+    // Auto-fetch live Google Sheet ("Product Order" + "Product Automation") immediately
+    handleSyncBothLiveSheets(true);
   }, []);
 
-  // Purge legacy Delhi dummy data, lock Google Sheet query data
+  // Periodic background centralization sync every 60s
+  useEffect(() => {
+    if (!autoSyncEnabled) return;
+    const interval = setInterval(() => {
+      handleSyncBothLiveSheets(true);
+    }, 60000);
+    return () => clearInterval(interval);
+  }, [autoSyncEnabled]);
+
+  // Purge legacy Delhi dummy data, re-fetch live Google Sheet
   const handlePurgeDelhiAndLockQuery = async () => {
     setIsFetchingQueryLive(true);
-    setSyncFeedback('🧹 Purging old cache & locking real Google Sheet Mumbai orders...');
+    setSyncFeedback('🧹 Purging old cache & pulling genuine live Google Sheet Mumbai orders...');
     try {
       await clearOrdersFromStorage();
       await purgeAllLegacyStorageAndCaches();
-      const fresh = (staticQueryOrders as any[])?.length > 0 ? (staticQueryOrders as any) : initialRawResponses;
-      setRawResponses(fresh);
-      await saveOrdersToStorage(fresh);
-      setSyncFeedback('🔒 Successfully locked to genuine Mumbai Google Sheet orders! (Delhi cache purged)');
+      await handleSyncBothLiveSheets(false);
     } catch (e: any) {
       console.error(e);
       setSyncFeedback('Reset complete.');
@@ -154,22 +341,28 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
   };
 
-  // Sync Live Data from user Google Sheet (Supports Product Automation 43-cols or Product Order)
+  // Single-tab or full live refresh handler
   const handleSyncGoogleQueryLive = async (targetTab?: string) => {
+    if (!targetTab) {
+      await handleSyncBothLiveSheets(false);
+      return;
+    }
     setIsFetchingQueryLive(true);
-    const chosenTab = targetTab || (activeSheetTab === 'product_order' ? 'Product Order' : AUTOMATION_TAB_NAME);
-    setSyncFeedback(`⚡ Fetching Google Sheet "${chosenTab}" (Cols A to AQ with Col U & Col AN)...`);
+    setSyncFeedback(`⚡ Fetching Google Sheet "${targetTab}"...`);
     try {
-      const res = await fetchLiveGoogleQueryData(AUTOMATION_SPREADSHEET_ID, chosenTab);
+      const res = await fetchLiveGoogleQueryData(AUTOMATION_SPREADSHEET_ID, targetTab);
       if (res.rows && res.rows.length > 0) {
-        setRawResponses(res.rows);
-        await saveOrdersToStorage(res.rows);
-        const hasDispatch = res.rows.some(r => (r.dispatchQty || 0) > 0);
-        const hasComplete = res.rows.some(r => isItemComplete(r.statusAN));
-        setSyncFeedback(
-          `✓ Loaded ${res.rows.length.toLocaleString()} rows from "${res.sheetTab}"! ` +
-          `Col U (Dispatch Qnt: ${hasDispatch ? 'Present' : '0'}) & Col AN (Complete: ${hasComplete ? 'Active' : 'Open'}) synced.`
-        );
+        if (targetTab.toLowerCase().includes('product order')) {
+          setRawResponses(res.rows);
+          await saveOrdersToStorage(res.rows);
+        } else {
+          setAutomationRows(res.rows);
+          await saveAutomationOrdersToStorage(res.rows);
+          hydrateFromAutomationRows(res.rows, true);
+        }
+        setLastSyncedAt(res.fetchedAt);
+        setLiveSyncSource(res.source);
+        setSyncFeedback(`✓ Synced ${res.rows.length.toLocaleString()} rows from "${res.sheetTab}" at ${res.fetchedAt}!`);
       }
     } catch (err: any) {
       console.error('Failed to sync live query:', err);
@@ -428,22 +621,26 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   // Quick edit modal for Order No (Col X)
   const [editingOrderNo, setEditingOrderNo] = useState<{ key: string; po: string; value: string } | null>(null);
 
-  // Debounced safe saving to IndexedDB (supports 10,000+ items without 3,000 cap)
+  // Debounced safe saving to IndexedDB for both Product Order & Product Automation
   useEffect(() => {
     const timer = setTimeout(() => {
-      // 1. Save entire array to IndexedDB (no 3,000 cap, supports 10,000+ rows)
       saveOrdersToStorage(rawResponses);
-      // 2. Safe fallback to localStorage for smaller datasets
       try {
         if (rawResponses.length <= 1500) {
           localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(rawResponses));
         }
-      } catch (e) {
-        // LocalStorage quota reached, safely handled by IndexedDB above
-      }
+      } catch (e) {}
     }, 600);
     return () => clearTimeout(timer);
   }, [rawResponses]);
+
+  useEffect(() => {
+    if (automationRows.length === 0) return;
+    const timer = setTimeout(() => {
+      saveAutomationOrdersToStorage(automationRows);
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [automationRows]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -497,18 +694,17 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     lrNumbers
   ]);
 
-  // Group raw responses into distinct orders
+  // Group Product Automation rows into distinct orders (sorted newest Google Sheet rows first)
   const groupedOrders: GroupedOrder[] = useMemo(() => {
-    const map: Record<string, GroupedOrder> = {};
+    const sourceForAutomation = automationRows.length > 0
+      ? automationRows
+      : rawResponses.filter(r => r.orderNo && r.orderNo.trim() !== '');
 
-    rawResponses.forEach((row) => {
-      const orderKey = [
-        row.customerPO,
-        row.customerName,
-        row.customerEmail,
-        row.customerNumber,
-        row.orderDate
-      ].map(v => (v || '').trim()).join('_');
+    const map: Record<string, GroupedOrder & { _maxRow?: number }> = {};
+
+    sourceForAutomation.forEach((row, idx) => {
+      const orderKey = buildOrderGroupKey(row);
+      const rowWeight = row.sheetRowIndex ?? idx;
 
       if (!map[orderKey]) {
         map[orderKey] = {
@@ -517,7 +713,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           timestamp: row.timestamp,
           customerPO: row.customerPO,
           customerName: row.customerName,
-          customerEmail: row.customerEmail,
+          customerEmail: row.customerEmail || row.customerMailId,
+          customerMailId: row.customerMailId || row.customerEmail,
           orderDate: row.orderDate,
           items: [],
           remark: row.remark || '',
@@ -526,6 +723,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           deliveryAddress: row.deliveryAddress,
           transporterName: row.transporterName,
           salesPerson: row.salesPerson,
+          salesPersonContact: row.salesPersonContact,
           accountStatus: row.accountStatus,
           branch: row.branch,
           approvalStatus: row.approvalStatus,
@@ -533,16 +731,23 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           branchHeadEmail: row.branchHeadEmail || 'vinay.chhajer@ginzalimited.com',
           orderNo: row.orderNo || '',
           orderNoTimestamp: row.orderNoTimestamp || '',
-          statusAN: (row.statusAN as any) || 'Open'
+          statusAN: (isItemComplete(row.statusAN) ? 'Complete' : row.statusAN) as any || 'Open',
+          _maxRow: rowWeight
         };
       } else {
         if (!map[orderKey].orderNo && row.orderNo) {
           map[orderKey].orderNo = row.orderNo;
           map[orderKey].orderNoTimestamp = row.orderNoTimestamp;
         }
+        if (isItemComplete(row.statusAN)) {
+          map[orderKey].statusAN = 'Complete';
+        }
+        if ((map[orderKey]._maxRow ?? 0) < rowWeight) {
+          map[orderKey]._maxRow = rowWeight;
+        }
       }
 
-      const itemKey = `${orderKey}___${row.itemName.trim()}___${row.color.trim()}___${row.width.trim()}`;
+      const itemKey = `${orderKey}___${(row.itemName || '').trim()}___${(row.color || '').trim()}___${(row.width || '').trim()}`;
       const dispatch = dispatchRecords[itemKey] !== undefined ? dispatchRecords[itemKey] : (Number(row.dispatchQty) || 0);
       const balance = Number((row.qty - dispatch).toFixed(4));
 
@@ -563,62 +768,66 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       });
     });
 
-    return Object.values(map);
-  }, [rawResponses, dispatchRecords]);
+    // Show newest Google Sheet orders on Page 1 first
+    return Object.values(map).sort((a, b) => (b._maxRow ?? 0) - (a._maxRow ?? 0));
+  }, [automationRows, rawResponses, dispatchRecords]);
 
   // Handle Status AM Dropdown Change: 'Open' | 'In-Progress' | 'Complete'
-  const handleItemStatusChange = (orderId: string, newStatus: 'Open' | 'In-Progress' | 'Closed' | 'Complete') => {
-    const canonicalStatus = isItemComplete(newStatus) ? 'Complete' : newStatus;
-    let targetOrderKey = '';
-    let affectedClient = '';
+  const handleItemStatusChange = async (orderId: string, newStatus: 'Open' | 'In-Progress' | 'Closed' | 'Complete') => {
+    const canonicalStatus: 'Open' | 'In-Progress' | 'Complete' = isItemComplete(newStatus)
+      ? 'Complete'
+      : newStatus === 'In-Progress'
+      ? 'In-Progress'
+      : 'Open';
 
-    for (const r of rawResponses) {
-      if (r.orderId === orderId) {
-        affectedClient = r.customerName || r.itemName;
-        targetOrderKey = [
-          r.customerPO,
-          r.customerName,
-          r.customerEmail,
-          r.customerNumber,
-          r.orderDate
-        ].map(v => (v || '').trim()).join('_');
-        break;
-      }
-    }
+    const targetRow = automationRows.find(r => r.orderId === orderId) || rawResponses.find(r => r.orderId === orderId);
+    const targetOrderKey = targetRow ? buildOrderGroupKey(targetRow) : '';
+    const affectedClient = targetRow?.customerName || targetRow?.itemName || orderId;
 
-    setRawResponses(prev =>
-      prev.map(row => {
-        const rowOrderKey = [
-          row.customerPO,
-          row.customerName,
-          row.customerEmail,
-          row.customerNumber,
-          row.orderDate
-        ].map(v => (v || '').trim()).join('_');
-
-        // Full record/order lifecycle sync: "complete means full records closed"
-        if (canonicalStatus === 'Complete' && rowOrderKey === targetOrderKey) {
-          return { ...row, statusAN: 'Complete' };
+    const updater = (list: ProductOrderRow[]) =>
+      list.map(row => {
+        const rowOrderKey = buildOrderGroupKey(row);
+        if (canonicalStatus === 'Complete' && targetOrderKey && rowOrderKey === targetOrderKey) {
+          return { ...row, statusAN: 'Complete' as const };
         }
-        if (row.orderId === orderId) {
+        if (row.orderId === orderId || (targetOrderKey && rowOrderKey === targetOrderKey)) {
           return { ...row, statusAN: canonicalStatus };
         }
         return row;
-      })
-    );
+      });
+
+    setAutomationRows(updater);
+    setRawResponses(updater);
+
+    let sheetNote = '';
+    if (webAppUrl && targetRow) {
+      const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
+        action: 'updateStatusAM',
+        sheetRowIndex: targetRow.sheetRowIndex,
+        timestamp: targetRow.timestamp,
+        customerName: targetRow.customerName,
+        itemName: targetRow.itemName,
+        orderNo: targetRow.orderNo,
+        statusAM: canonicalStatus
+      });
+      sheetNote = writeRes.ok ? ' | Google Sheet Col AM updated ✓' : ` | Sheet sync: ${writeRes.message}`;
+    }
 
     setSyncFeedback(
-      `Order "${affectedClient || orderId}" Col AM set to "${canonicalStatus}". ${
+      `Order "${affectedClient}" Col AM set to "${canonicalStatus}". ${
         canonicalStatus === 'Complete'
-          ? 'Full order moved automatically to "Closed Orders (Complete)"!'
-          : 'Active in "Product Automation".'
-      }`
+          ? 'Moved automatically to "Closed Orders (Complete)"!'
+          : 'Active in "Product Automation (Open)".'
+      }${sheetNote}`
     );
-    setTimeout(() => setSyncFeedback(null), 4000);
+    setTimeout(() => setSyncFeedback(null), 4500);
   };
 
-  // Handle changing Dispatch Qty in Col Y
-  const handleDispatchChange = (orderKey: string, item: { itemName: string; color: string; width: string }, newQtyStr: string) => {
+  // Debounce timers for pushing Col U Dispatch Qty to Google Sheet
+  const dispatchPushTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+
+  // Handle changing Dispatch Qty in Col U
+  const handleDispatchChange = (orderKey: string, item: { id?: string; itemName: string; color: string; width: string }, newQtyStr: string) => {
     const val = newQtyStr === '' ? 0 : (Number(newQtyStr) || 0);
     const itemKey = `${orderKey}___${item.itemName.trim()}___${item.color.trim()}___${item.width.trim()}`;
 
@@ -626,29 +835,53 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       ...prev,
       [itemKey]: val
     }));
+
+    setAutomationRows(prev =>
+      prev.map(r => {
+        if (r.orderId === item.id || buildOrderGroupKey(r) === orderKey && r.itemName.trim() === item.itemName.trim()) {
+          return {
+            ...r,
+            dispatchQty: val,
+            balanceQty: Number((r.qty - val).toFixed(4))
+          };
+        }
+        return r;
+      })
+    );
+
+    if (webAppUrl) {
+      const targetRow = automationRowsRef.current.find(r => r.orderId === item.id || buildOrderGroupKey(r) === orderKey);
+      if (targetRow) {
+        if (dispatchPushTimersRef.current[itemKey]) {
+          clearTimeout(dispatchPushTimersRef.current[itemKey]);
+        }
+        dispatchPushTimersRef.current[itemKey] = setTimeout(() => {
+          pushOrderUpdateToGoogleSheet(webAppUrl, {
+            action: 'updateDispatchQty',
+            sheetRowIndex: targetRow.sheetRowIndex,
+            timestamp: targetRow.timestamp,
+            customerName: targetRow.customerName,
+            itemName: item.itemName,
+            orderNo: targetRow.orderNo,
+            dispatchQty: val
+          });
+        }, 900);
+      }
+    }
   };
 
   // Delete an entire order
   const handleDeleteOrder = (orderKey: string, poName: string) => {
     if (!window.confirm(`Are you sure you want to delete order "${poName}"?`)) return;
-    setRawResponses(prev =>
-      prev.filter(row => {
-        const key = [
-          row.customerPO,
-          row.customerName,
-          row.customerEmail,
-          row.customerNumber,
-          row.orderDate
-        ].map(v => (v || '').trim()).join('_');
-        return key !== orderKey;
-      })
-    );
+    setAutomationRows(prev => prev.filter(row => buildOrderGroupKey(row) !== orderKey));
+    setRawResponses(prev => prev.filter(row => buildOrderGroupKey(row) !== orderKey));
     setSyncFeedback(`Order ${poName} deleted successfully.`);
     setTimeout(() => setSyncFeedback(null), 3500);
   };
 
   // Delete single item row
   const handleDeleteItem = (itemOrderId: string) => {
+    setAutomationRows(prev => prev.filter(row => row.orderId !== itemOrderId));
     setRawResponses(prev => prev.filter(row => row.orderId !== itemOrderId));
     setSyncFeedback(`Item row removed.`);
     setTimeout(() => setSyncFeedback(null), 3000);
@@ -812,49 +1045,24 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
   };
 
-  // Generate or assign Order No for a row in Product Order sheet
-  const handleGenerateOrderNo = (orderId: string, customNo?: string) => {
+  // Generate or assign Order No for a row in Product Order sheet + sync to Product Automation + Google Sheet
+  const handleGenerateOrderNo = async (orderId: string, customNo?: string) => {
     const generatedNo = (customNo && customNo.trim() !== '')
       ? customNo.trim()
-      : `DLFSO2526-0${Math.floor(1750 + Math.random() * 50)}`;
+      : `MMFSO2526-0${Math.floor(1750 + Math.random() * 50)}`;
     const nowStr = new Date().toLocaleString('en-IN');
-    let affectedItem = '';
+    const targetRow = rawResponses.find(r => r.orderId === orderId);
+    const affectedItem = targetRow?.itemName || orderId;
+    const newGroupKey = targetRow
+      ? (targetRow.orderGroupKey || [generatedNo, targetRow.customerName, targetRow.orderDate].map(v => (v || '').trim()).join('_'))
+      : orderId;
 
     setRawResponses(prev =>
       prev.map(row => {
         if (row.orderId === orderId) {
-          affectedItem = row.itemName;
           return {
             ...row,
             orderNo: generatedNo,
-            orderNoTimestamp: nowStr,
-            statusAN: row.statusAN || 'Open' // By default, status in Col AN is Open
-          };
-        }
-        return row;
-      })
-    );
-
-    setSyncFeedback(
-      `Order No "${generatedNo}" assigned for ${affectedItem || orderId}! Order flowed into "Product Automation (Active Orders)" with Col AN default "Open".`
-    );
-    setTimeout(() => setSyncFeedback(null), 4500);
-  };
-
-  // Generate Order No for all pending rows in Product Order
-  const handleGenerateAllPendingOrderNo = () => {
-    let counter = 1752;
-    const nowStr = new Date().toLocaleString('en-IN');
-    let countGenerated = 0;
-
-    setRawResponses(prev =>
-      prev.map(row => {
-        if (!row.orderNo || row.orderNo.trim() === '') {
-          countGenerated++;
-          const genNo = `DLFSO2526-0${counter++}`;
-          return {
-            ...row,
-            orderNo: genNo,
             orderNoTimestamp: nowStr,
             statusAN: row.statusAN || 'Open'
           };
@@ -863,17 +1071,112 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       })
     );
 
+    if (targetRow) {
+      const promotedRow: ProductOrderRow = {
+        ...targetRow,
+        orderGroupKey: newGroupKey,
+        orderNo: generatedNo,
+        orderNoTimestamp: nowStr,
+        statusAN: isItemComplete(targetRow.statusAN) ? targetRow.statusAN : 'Open',
+        dispatchQty: targetRow.dispatchQty ?? 0,
+        balanceQty: targetRow.balanceQty ?? targetRow.qty
+      };
+
+      setAutomationRows(prev => {
+        const existsIdx = prev.findIndex(r => r.orderId === orderId || (r.orderGroupKey && r.orderGroupKey === newGroupKey));
+        if (existsIdx >= 0) {
+          return prev.map((r, i) => (i === existsIdx ? { ...r, orderNo: generatedNo, orderNoTimestamp: nowStr } : r));
+        }
+        return [promotedRow, ...prev];
+      });
+    }
+
+    let sheetNote = '';
+    if (webAppUrl && targetRow) {
+      const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
+        action: 'updateOrderNo',
+        sheetRowIndex: targetRow.sheetRowIndex,
+        timestamp: targetRow.timestamp,
+        customerName: targetRow.customerName,
+        itemName: targetRow.itemName,
+        orderNo: generatedNo
+      });
+      sheetNote = writeRes.ok
+        ? ' & saved in Google Sheet Col S ✓'
+        : ` (Google Sheet write note: ${writeRes.message})`;
+    } else {
+      sheetNote = ' (Saved in App! Click "2-Way Write-Back" to also auto-write into Google Sheet Col S)';
+    }
+
     setSyncFeedback(
-      `Generated Order Numbers for ${countGenerated} pending orders! All flowed to Product Automation (Active Orders) with Col AN default "Open".`
+      `Order No "${generatedNo}" assigned for ${affectedItem}! Active in "Product Automation (Open)"${sheetNote}`
+    );
+    setTimeout(() => setSyncFeedback(null), 5000);
+  };
+
+  // Generate Order No for all pending rows in Product Order
+  const handleGenerateAllPendingOrderNo = () => {
+    let counter = 1752;
+    const nowStr = new Date().toLocaleString('en-IN');
+    let countGenerated = 0;
+    const newlyPromoted: ProductOrderRow[] = [];
+
+    setRawResponses(prev =>
+      prev.map(row => {
+        if (!row.orderNo || row.orderNo.trim() === '') {
+          countGenerated++;
+          const genNo = `MMFSO2526-0${counter++}`;
+          const updated: ProductOrderRow = {
+            ...row,
+            orderNo: genNo,
+            orderNoTimestamp: nowStr,
+            statusAN: row.statusAN || 'Open'
+          };
+          newlyPromoted.push({
+            ...updated,
+            orderGroupKey: [genNo, row.customerName, row.orderDate].map(v => (v || '').trim()).join('_')
+          });
+          return updated;
+        }
+        return row;
+      })
+    );
+
+    if (newlyPromoted.length > 0) {
+      setAutomationRows(prev => [...newlyPromoted, ...prev]);
+    }
+
+    setSyncFeedback(
+      `Generated Order Numbers for ${countGenerated} pending orders! All flowed to Product Automation (Open).`
     );
     setTimeout(() => setSyncFeedback(null), 4500);
   };
 
-  // Add new row into Product Order
-  const handleAddNewProductOrderRow = (newRow: ProductOrderRow) => {
+  // Add new row into Product Order (+ push to Google Sheet if Web App configured)
+  const handleAddNewProductOrderRow = async (newRow: ProductOrderRow) => {
     setRawResponses(prev => [newRow, ...prev]);
-    setSyncFeedback(`New Order ${newRow.customerPO} (${newRow.referenceNo}) added to Product Order!`);
-    setTimeout(() => setSyncFeedback(null), 4000);
+    if (newRow.orderNo && newRow.orderNo.trim() !== '') {
+      setAutomationRows(prev => [
+        {
+          ...newRow,
+          orderGroupKey: [newRow.orderNo, newRow.customerName, newRow.orderDate].map(v => (v || '').trim()).join('_'),
+          statusAN: 'Open'
+        },
+        ...prev
+      ]);
+    }
+
+    let sheetNote = '';
+    if (webAppUrl) {
+      const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
+        action: 'addOrderRow',
+        rowData: newRow
+      });
+      sheetNote = writeRes.ok ? ' & appended to Google Sheet ✓' : ` (Sheet note: ${writeRes.message})`;
+    }
+
+    setSyncFeedback(`New Order "${newRow.customerName}" added to Product Order${sheetNote}!`);
+    setTimeout(() => setSyncFeedback(null), 4500);
   };
 
   // Update row field in Product Order
@@ -883,31 +1186,55 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     );
   };
 
-  // Update Order No (Col X)
-  const handleSaveOrderNo = () => {
+  // Update Order No (Col S) from Product Automation modal & sync back to Product Order + Google Sheet
+  const handleSaveOrderNo = async () => {
     if (!editingOrderNo) return;
-    setRawResponses(prev =>
-      prev.map(row => {
-        const key = [
-          row.customerPO,
-          row.customerName,
-          row.customerEmail,
-          row.customerNumber,
-          row.orderDate
-        ].map(v => (v || '').trim()).join('_');
+    const nowStr = new Date().toLocaleString('en-IN');
+    const newVal = editingOrderNo.value.trim();
 
-        if (key === editingOrderNo.key) {
+    let matchedRow: ProductOrderRow | undefined;
+
+    setAutomationRows(prev =>
+      prev.map(row => {
+        if (buildOrderGroupKey(row) === editingOrderNo.key) {
+          matchedRow = row;
           return {
             ...row,
-            orderNo: editingOrderNo.value,
-            orderNoTimestamp: new Date().toLocaleString('en-IN'),
+            orderNo: newVal,
+            orderNoTimestamp: nowStr,
             statusAN: row.statusAN || 'Open'
           };
         }
         return row;
       })
     );
-    setSyncFeedback(`Order No for ${editingOrderNo.po} set to "${editingOrderNo.value}" in Col X!`);
+
+    if (matchedRow) {
+      setRawResponses(prev =>
+        prev.map(r => {
+          if (
+            r.customerName.trim().toLowerCase() === matchedRow!.customerName.trim().toLowerCase() &&
+            r.timestamp === matchedRow!.timestamp
+          ) {
+            return { ...r, orderNo: newVal, orderNoTimestamp: nowStr };
+          }
+          return r;
+        })
+      );
+
+      if (webAppUrl) {
+        await pushOrderUpdateToGoogleSheet(webAppUrl, {
+          action: 'updateOrderNo',
+          sheetRowIndex: matchedRow.sheetRowIndex,
+          timestamp: matchedRow.timestamp,
+          customerName: matchedRow.customerName,
+          itemName: matchedRow.itemName,
+          orderNo: newVal
+        });
+      }
+    }
+
+    setSyncFeedback(`Order No for ${editingOrderNo.po || matchedRow?.customerName} set to "${newVal}" in Col S!`);
     setEditingOrderNo(null);
     setTimeout(() => setSyncFeedback(null), 4000);
   };
@@ -1648,10 +1975,29 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     setIsFetchingSheet(true);
     setImportError(null);
 
-    // Google Sheets Visualization API CSV export endpoint:
-    const gvizUrl = `https://docs.google.com/spreadsheets/d/${cleanId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(importTabName.trim())}`;
-
     try {
+      const tabLower = importTabName.trim().toLowerCase();
+      const res = await fetchLiveGoogleQueryData(cleanId, importTabName.trim());
+      if (res.rows && res.rows.length > 0 && res.source === 'live') {
+        if (tabLower.includes('product order')) {
+          setRawResponses(importReplaceMode ? res.rows : prev => [...res.rows, ...prev]);
+          await saveOrdersToStorage(res.rows);
+        } else {
+          setAutomationRows(importReplaceMode ? res.rows : prev => [...res.rows, ...prev]);
+          await saveAutomationOrdersToStorage(res.rows);
+          hydrateFromAutomationRows(res.rows, true);
+        }
+        setLastSyncedAt(res.fetchedAt);
+        setLiveSyncSource('live');
+        setShowImportModal(false);
+        setImportError(null);
+        setSyncFeedback(`✓ Live Google Sheet "${importTabName.trim()}" se ${res.rows.length.toLocaleString()} rows import aur save ho gayi!`);
+        setTimeout(() => setSyncFeedback(null), 5000);
+        return;
+      }
+
+      // Direct gviz fallback for third-party spreadsheets without known gid
+      const gvizUrl = `https://docs.google.com/spreadsheets/d/${cleanId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(importTabName.trim())}`;
       const resp = await fetch(gvizUrl);
       if (!resp.ok) {
         throw new Error(`Google Sheets responded with HTTP status ${resp.status}`);
@@ -1660,13 +2006,10 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       if (!csvText || csvText.trim().length === 0) {
         throw new Error(`Tab "${importTabName}" me koi data nahi mila ya tab exist nahi karta.`);
       }
-
-      // Check if Google returned an HTML login/permission page
       if (csvText.startsWith('<!DOCTYPE html>') || csvText.includes('<html')) {
         throw new Error('Google Sheet private hai ya access restricted hai. Sheet ko Share > "Anyone with the link can view" karein, ya "Paste (Ctrl+V)" tab use karein.');
       }
 
-      // Parse and import data
       await handleParseImportedData(csvText, autoSyncToFirebase, `Google Sheet Tab: ${importTabName.trim()}`);
     } catch (err: any) {
       console.error('Google Sheet Import Error:', err);
@@ -1718,9 +2061,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     const result: GroupedOrder[] = [];
 
     groupedOrders.forEach(order => {
-      // In "Product Automation (Active Orders)" and "Closed Orders":
-      // An order ONLY flows in once its Order Number has been assigned/entered in "Product Order"!
-      if (activeSheetTab === 'automation' || activeSheetTab === 'closed') {
+      // When falling back to Product Order rows (no Product Automation rows loaded), require Order No
+      if (automationRows.length === 0 && (activeSheetTab === 'automation' || activeSheetTab === 'closed')) {
         if (!order.orderNo || order.orderNo.trim() === '') {
           return;
         }
@@ -1729,12 +2071,13 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       // User rule: "AM me jinka status complete he wo full row wali order Closed he to usko autoamatic closed order sheet me dal dena . complete hoga means full records closed he."
       const isOrderComplete = isItemComplete(order.statusAN) || order.items.some(it => isItemComplete(it.statusAN));
 
-      // 1. Tab filter
+      // 1. Tab filter — STRICT REQUIREMENT:
+      // - "Product Automation" tab shows ONLY Open / In-Progress orders (Col AM !== Complete)
+      // - "Closed Orders" tab shows ONLY records where Col AM status is Complete
       if (activeSheetTab === 'automation') {
-        // If statusFilter is 'ALL' or 'Complete', allow viewing complete orders even in automation tab!
-        if (isOrderComplete && statusFilter !== 'ALL' && statusFilter !== 'Complete') return; // By default, only active open orders
+        if (isOrderComplete) return; // Strictly hide Col AM Complete records from Product Automation
       } else if (activeSheetTab === 'closed') {
-        if (!isOrderComplete) return; // Only complete orders show in closed tab!
+        if (!isOrderComplete) return; // Strictly show ONLY Col AM Complete records in Closed Orders
       }
 
       // 2. Toolbar Status dropdown filter
@@ -1850,7 +2193,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
 
     return result;
-  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, colFilters, sortConfig, aeStatuses, aoStatuses]);
+  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, colFilters, sortConfig, acStatuses, anStatuses, colWStatuses, colXRemarks, colAEChecks, colAFTimestamps, colAGRemarks, colAHChecks, colAITimestamps, colAJRemarks, lrNumbers]);
 
   // Virtual Pagination for Product Automation & Closed Orders to prevent browser crash/freeze
   const [automationPage, setAutomationPage] = useState(1);
@@ -1875,16 +2218,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
   // Aggregate metrics
   const totalOrdersCount = groupedOrders.length;
-  const pendingOnCount = rawResponses.filter(r => !r.orderNo || r.orderNo.trim() === '').length;
-  const activeItemsCount = rawResponses.filter(r => !isItemComplete(r.statusAN)).length;
-  const closedItemsCount = rawResponses.filter(r => isItemComplete(r.statusAN)).length;
-
   const closedOrdersCount = groupedOrders.filter(o => isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN))).length;
-  const activeOrdersCount = groupedOrders.filter(o => o.orderNo && o.orderNo.trim() !== '' && !(isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN)))).length;
-  const totalItemRows = filteredOrders.reduce((sum, ord) => sum + ord.items.length, 0);
-  const totalOrderQty = filteredOrders.reduce((sum, ord) => sum + ord.items.reduce((s, it) => s + it.qty, 0), 0);
-  const totalDispatched = filteredOrders.reduce((sum, ord) => sum + ord.items.reduce((s, it) => s + (it.dispatchQty || 0), 0), 0);
-  const totalBalance = totalOrderQty - totalDispatched;
+  const activeOrdersCount = groupedOrders.filter(o => !(isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN)))).length;
 
   // Toggle filter value for a column
   const toggleColFilterValue = (col: string, val: string) => {
@@ -1953,7 +2288,114 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
+      {/* CONSTANT STICKY TOP SHEET TABS & CENTRALIZED SYNC BAR */}
+      <div className="sticky top-11 z-30 bg-slate-100/95 backdrop-blur-xs border border-slate-300 rounded-xl shadow-xs px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 select-none">
+        {/* Top Constant Sheet Tab Names */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          {/* Tab 1: Product Order */}
+          <button
+            type="button"
+            onClick={() => {
+              setActiveSheetTab('product_order');
+              setStatusFilter('ALL');
+            }}
+            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-2 cursor-pointer border ${
+              activeSheetTab === 'product_order'
+                ? 'bg-blue-700 text-white border-blue-800 shadow-sm'
+                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+            }`}
+          >
+            <FileSpreadsheet className={`w-3.5 h-3.5 ${activeSheetTab === 'product_order' ? 'text-blue-200' : 'text-blue-600'}`} />
+            <span>Product Order</span>
+          </button>
+
+          {/* Tab 2: Product Automation (Strictly Open Only) */}
+          <button
+            type="button"
+            onClick={() => {
+              setActiveSheetTab('automation');
+              setStatusFilter('ALL');
+              setAutomationPage(1);
+            }}
+            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-2 cursor-pointer border ${
+              activeSheetTab === 'automation'
+                ? 'bg-emerald-700 text-white border-emerald-800 shadow-sm'
+                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+            }`}
+          >
+            <Layers className={`w-3.5 h-3.5 ${activeSheetTab === 'automation' ? 'text-emerald-200' : 'text-emerald-600'}`} />
+            <span>Product Automation (Open)</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
+              activeSheetTab === 'automation' ? 'bg-emerald-900 text-emerald-100' : 'bg-emerald-100 text-emerald-800'
+            }`}>
+              {activeOrdersCount} Open
+            </span>
+          </button>
+
+          {/* Tab 3: Closed Orders (Strictly Col AM Complete Only) */}
+          <button
+            type="button"
+            onClick={() => {
+              setActiveSheetTab('closed');
+              setStatusFilter('ALL');
+              setAutomationPage(1);
+            }}
+            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-2 cursor-pointer border ${
+              activeSheetTab === 'closed'
+                ? 'bg-indigo-700 text-white border-indigo-800 shadow-sm'
+                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+            }`}
+          >
+            <Archive className={`w-3.5 h-3.5 ${activeSheetTab === 'closed' ? 'text-indigo-200' : 'text-indigo-600'}`} />
+            <span>Closed Orders (Col AM Complete)</span>
+            <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded-full ${
+              activeSheetTab === 'closed' ? 'bg-indigo-900 text-indigo-100' : 'bg-indigo-100 text-indigo-800'
+            }`}>
+              {closedOrdersCount.toLocaleString()}
+            </span>
+          </button>
+        </div>
+
+        {/* Right Side: Live Centralization Sync Controls */}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white border border-slate-300 text-[11px] text-slate-700">
+            <span className={`w-2 h-2 rounded-full ${liveSyncSource === 'live' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></span>
+            <span className="font-semibold">
+              {liveSyncSource === 'live' ? 'Live Sheet Connected' : 'Local Cache'}
+            </span>
+            {lastSyncedAt && (
+              <span className="font-mono text-[10px] text-slate-500">({lastSyncedAt})</span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            disabled={isFetchingQueryLive}
+            onClick={() => handleSyncBothLiveSheets(false)}
+            className="px-2.5 py-1 bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-bold rounded-lg shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer"
+            title="Fetch both Product Order & Product Automation live from Google Sheet"
+          >
+            {isFetchingQueryLive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+            <span>{isFetchingQueryLive ? 'Syncing...' : 'Sync Live Sheet'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setShowTwoWaySyncModal(true)}
+            className={`px-2.5 py-1 text-xs font-bold rounded-lg border shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer ${
+              webAppUrl
+                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
+                : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+            }`}
+            title="Enable 2-Way Centralization (Write Order No, Dispatch Qty & Col AM directly back to Google Sheet)"
+          >
+            <Link2 className="w-3.5 h-3.5" />
+            <span>{webAppUrl ? '2-Way Sheet Write ON ✓' : '2-Way Sheet Setup'}</span>
+          </button>
+        </div>
+      </div>
+
       {/* SPREADSHEET TOOLBAR & CONTROLS */}
       <div className="bg-white rounded-xl border border-slate-300 shadow-xs overflow-hidden">
         {/* Top Control Bar - ALL IN ONE SINGLE LINE */}
@@ -1980,23 +2422,31 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               )}
             </div>
 
-            {/* Quick Status Filter */}
-            <div className="flex items-center gap-1 text-xs shrink-0">
-              <span className="text-slate-500 font-medium text-[11px] flex items-center gap-0.5">
-                <Filter className="w-3 h-3" />
-                Status:
-              </span>
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value as any)}
-                className="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-              >
-                <option value="ALL">All Statuses ({totalOrdersCount})</option>
-                <option value="Open">🔵 Open Only ({groupedOrders.filter(o => !isItemComplete(o.statusAN) && o.statusAN !== 'In-Progress').length})</option>
-                <option value="In-Progress">🟡 In-Progress Only ({groupedOrders.filter(o => o.statusAN === 'In-Progress').length})</option>
-                <option value="Complete">🟢 Complete Only ({closedOrdersCount})</option>
-              </select>
-            </div>
+            {/* Quick Status Filter (Contextual for Automation / Closed) */}
+            {activeSheetTab === 'automation' && (
+              <div className="flex items-center gap-1 text-xs shrink-0">
+                <span className="text-slate-500 font-medium text-[11px] flex items-center gap-0.5">
+                  <Filter className="w-3 h-3" />
+                  Open Filter:
+                </span>
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value as any)}
+                  className="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                >
+                  <option value="ALL">All Open Orders ({activeOrdersCount})</option>
+                  <option value="Open">🔵 Open Only ({groupedOrders.filter(o => !isItemComplete(o.statusAN) && o.statusAN !== 'In-Progress').length})</option>
+                  <option value="In-Progress">🟡 In-Progress Only ({groupedOrders.filter(o => o.statusAN === 'In-Progress').length})</option>
+                </select>
+              </div>
+            )}
+
+            {activeSheetTab === 'closed' && (
+              <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-900 text-xs font-bold shrink-0">
+                <Archive className="w-3.5 h-3.5 text-indigo-600" />
+                <span>Showing Col AM = &quot;Complete&quot; Only ({closedOrdersCount} Records)</span>
+              </div>
+            )}
 
             {/* ONLY Order Status Badge */}
             <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-sky-50 border border-sky-200 text-sky-950 text-xs shadow-2xs shrink-0">
@@ -2046,9 +2496,6 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                 Flat Unmerged
               </button>
             </div>
-
-            {/* FREEZE PANES BUTTON - 1-CLICK TOGGLE TO UNFREEZE AND BACK */}
-
 
             {/* Columns Hide / Show Button */}
             <button
@@ -2113,7 +2560,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
               <span className="font-medium">{syncFeedback}</span>
             </div>
-            <span className="text-[11px] text-emerald-700 font-mono">Saved in Browser LocalStorage ✓</span>
+            <span className="text-[11px] text-emerald-700 font-mono">Saved &amp; Synced ✓</span>
           </div>
         )}
 
@@ -2135,10 +2582,13 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             onUpdateRow={handleUpdateProductOrderRow}
             onNavigateToAutomation={() => setActiveSheetTab('automation')}
             onAddNewRow={handleAddNewProductOrderRow}
-            onFetchQueryLive={handleSyncGoogleQueryLive}
+            onFetchQueryLive={() => handleSyncBothLiveSheets(false)}
             isFetchingLive={isFetchingQueryLive}
             onOpenQueryStudio={onOpenQueryStudio}
             onPurgeDelhiAndLock={handlePurgeDelhiAndLockQuery}
+            lastSyncedAt={lastSyncedAt}
+            webAppConfigured={Boolean(webAppUrl)}
+            onOpenTwoWaySyncModal={() => setShowTwoWaySyncModal(true)}
           />
         ) : (
           <div className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-140px)] max-h-[89vh]' : 'h-[640px] max-h-[74vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}>
@@ -2496,64 +2946,6 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           </div>
         )}
 
-        {/* GOOGLE SHEETS BOTTOM TABS BAR */}
-        <div className="bg-slate-200 border-t border-slate-300 px-2 py-0.5 flex items-center justify-between gap-2 select-none">
-          {/* Tabs: Product Order, Product Automation, Closed Orders */}
-          <div className="flex items-center gap-1">
-            {/* Tab 1: Product Order */}
-            <button
-              onClick={() => setActiveSheetTab('product_order')}
-              className={`px-3 py-1 text-xs font-bold rounded-t-md transition-colors flex items-center gap-1.5 cursor-pointer ${
-                activeSheetTab === 'product_order'
-                  ? 'bg-white text-blue-900 shadow-xs border-t-2 border-blue-600'
-                  : 'bg-slate-300/80 text-slate-700 hover:bg-slate-300'
-              }`}
-            >
-              <FileSpreadsheet className="w-3.5 h-3.5 text-blue-600" />
-              <span>Product Order</span>
-            </button>
-
-            {/* Tab 2: Product Automation */}
-            <button
-              onClick={() => setActiveSheetTab('automation')}
-              className={`px-3 py-1 text-xs font-bold rounded-t-md transition-colors flex items-center gap-1.5 cursor-pointer ${
-                activeSheetTab === 'automation'
-                  ? 'bg-white text-emerald-800 shadow-xs border-t-2 border-emerald-600'
-                  : 'bg-slate-300/80 text-slate-700 hover:bg-slate-300'
-              }`}
-            >
-              <Layers className="w-3.5 h-3.5 text-emerald-600" />
-              <span>Product Automation</span>
-            </button>
-
-            {/* Tab 3: Closed Orders */}
-            <button
-              onClick={() => setActiveSheetTab('closed')}
-              className={`px-3 py-1 text-xs font-bold rounded-t-md transition-colors flex items-center gap-1.5 cursor-pointer ${
-                activeSheetTab === 'closed'
-                  ? 'bg-white text-indigo-900 shadow-xs border-t-2 border-indigo-600'
-                  : 'bg-slate-300/80 text-slate-700 hover:bg-slate-300'
-              }`}
-            >
-              <Archive className="w-3.5 h-3.5 text-indigo-600" />
-              <span>Closed Orders</span>
-            </button>
-
-            <button
-              onClick={() => setShowNewOrderModal(true)}
-              className="p-1 text-slate-600 hover:text-emerald-700 hover:bg-slate-300 rounded transition-colors"
-              title="Add New Order Sheet Row"
-            >
-              <Plus className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          {/* Status info - compact */}
-          <div className="text-[10px] text-slate-600 flex items-center gap-1.5 shrink-0">
-            <span className="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-            <span>Live Web Sheet Workspace</span>
-          </div>
-        </div>
       </div>
 
       {/* MODAL: DIRECT GOOGLE SHEET (ID + TAB) & EXCEL / CSV DATA IMPORT */}
@@ -3514,6 +3906,134 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           </div>
         );
       })()}
+      {/* MODAL: 2-WAY GOOGLE SHEET WRITE-BACK (APPS SCRIPT WEB APP SETUP) */}
+      {showTwoWaySyncModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full border border-slate-200 overflow-hidden my-6">
+            <div className="px-6 py-4 bg-gradient-to-r from-emerald-900 to-teal-800 text-white flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-sm sm:text-base flex items-center gap-2">
+                  <Link2 className="w-4 h-4 text-emerald-300" />
+                  2-Way Google Sheet Centralization (App ⇄ Google Sheet)
+                </h3>
+                <p className="text-[11px] text-emerald-100">
+                  App me Order No (Col S), Dispatch Qnt (Col U), ya Col AM edit karte hi direct Google Sheet update hoga
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTwoWaySyncModal(false)}
+                className="text-emerald-100 hover:text-white p-1 rounded-lg hover:bg-white/10 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs max-h-[75vh] overflow-y-auto">
+              <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-950 space-y-1">
+                <span className="font-bold block">How 2-Way Centralization Works:</span>
+                <p className="text-[11px] text-emerald-800 leading-relaxed">
+                  <strong>1) Sheet ➔ App (Already Active ✓):</strong> Google Sheet ke &quot;Product Order&quot; &amp; &quot;Product Automation&quot; tabs me koi bhi Order Number, Dispatch Qnt, ya Col AM status dalein, app me auto-sync ho jata hai.
+                </p>
+                <p className="text-[11px] text-emerald-800 leading-relaxed">
+                  <strong>2) App ➔ Sheet Write-Back:</strong> Google Sheet me row write karne ke liye neeche diya Apps Script deploy karke apna Web App URL yahan paste karein.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="text-[11px] font-bold text-slate-800 block">
+                  Step 1: Deploy Apps Script as Web App (Access: &quot;Anyone&quot;)
+                </label>
+                <div className="flex items-center justify-between gap-2 bg-slate-900 text-slate-200 p-2.5 rounded-lg">
+                  <span className="text-[11px] font-mono truncate">
+                    Extensions ➔ Apps Script ➔ Paste Code ➔ Deploy ➔ Web App (Anyone)
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard.writeText(generateTwoWayWebAppCode(defaultGasConfig));
+                      setCopiedWebAppScript(true);
+                      setTimeout(() => setCopiedWebAppScript(false), 2500);
+                    }}
+                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded text-[11px] font-bold flex items-center gap-1 shrink-0 cursor-pointer"
+                  >
+                    {copiedWebAppScript ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedWebAppScript ? 'Copied Code!' : 'Copy Web App Script'}</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-[11px] font-bold text-slate-800 block">
+                  Step 2: Paste Deployed Google Apps Script Web App URL
+                </label>
+                <input
+                  type="url"
+                  value={webAppUrl}
+                  onChange={(e) => setWebAppUrl(e.target.value)}
+                  placeholder="https://script.google.com/macros/s/AKfycb.../exec"
+                  className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg font-mono focus:ring-1 focus:ring-emerald-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="pt-2 border-t border-slate-200 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  disabled={testingWebApp || !webAppUrl.trim().startsWith('https://script.google.com/')}
+                  onClick={async () => {
+                    setTestingWebApp(true);
+                    try {
+                      const resp = await fetch(webAppUrl.trim());
+                      const data = await resp.json();
+                      if (data.ok) {
+                        setSyncFeedback('✓ 2-Way Apps Script Web App Verified & Connected!');
+                      } else {
+                        setSyncFeedback('Web App responded, check spreadsheet permissions.');
+                      }
+                    } catch (err: any) {
+                      setSyncFeedback(`Web App ping failed: ${err?.message || 'Ensure access is set to Anyone'}`);
+                    } finally {
+                      setTestingWebApp(false);
+                      setTimeout(() => setSyncFeedback(null), 4000);
+                    }
+                  }}
+                  className="px-3 py-1.5 border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 rounded-lg font-semibold text-xs disabled:opacity-50 cursor-pointer"
+                >
+                  {testingWebApp ? 'Testing...' : 'Test Connection'}
+                </button>
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWebAppUrl('');
+                      try { localStorage.removeItem(WEB_APP_URL_STORAGE_KEY); } catch {}
+                      setShowTwoWaySyncModal(false);
+                    }}
+                    className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-800 cursor-pointer"
+                  >
+                    Clear URL
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try {
+                        localStorage.setItem(WEB_APP_URL_STORAGE_KEY, webAppUrl.trim());
+                      } catch {}
+                      setShowTwoWaySyncModal(false);
+                      setSyncFeedback(webAppUrl.trim() ? '✓ 2-Way Google Sheet Write-Back Saved!' : '2-Way URL cleared.');
+                      setTimeout(() => setSyncFeedback(null), 4000);
+                    }}
+                    className="px-4 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-lg text-xs cursor-pointer"
+                  >
+                    Save Web App URL
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -4148,46 +4668,28 @@ function renderSpreadsheetRows(
           {/* COLUMNS AN TO AQ: DELIVERED WHATSAPP & EMAILS (VERTICALLY MERGED PER ORDER) */}
           {showHeaderCols && (
             <>
-              {/* Col AN: Status AN / Delivered Whatspp Msg (Complete / Open / Message Sent) */}
+              {/* Col AN: Delivered Whatspp Msg ("Pending" / "Message Sent") */}
               {visibleCols['AN'] && (
                 <td
                   rowSpan={rowSpan}
-                  className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle whitespace-nowrap ${cellBottomBorder} ${
-                    isItemComplete(order.statusAN) || handlers.anStatuses[currentOrderKey] === 'Complete'
-                      ? 'bg-emerald-50/60'
-                      : 'bg-purple-50/20'
-                  }`}
+                  className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle whitespace-nowrap ${cellBottomBorder} bg-purple-50/20`}
                 >
                   <select
-                    value={
-                      isItemComplete(order.statusAN) || handlers.anStatuses[currentOrderKey] === 'Complete'
-                        ? 'Complete'
-                        : (handlers.anStatuses[currentOrderKey] || 'Pending')
-                    }
+                    value={handlers.anStatuses[currentOrderKey] === 'Message Sent' ? 'Message Sent' : 'Pending'}
                     onChange={(e) => {
                       const val = e.target.value;
                       handlers.setAnStatuses(prev => ({ ...prev, [currentOrderKey]: val }));
-                      if (val === 'Complete') {
-                        handlers.onItemStatusChange(order.items[0]?.id, 'Complete');
-                        handlers.setSyncFeedback(`Order "${order.customerName || order.orderNo}" marked Complete in Col AN! Automatically moved to "Closed Orders" tab.`);
-                      } else if (val === 'Open') {
-                        handlers.onItemStatusChange(order.items[0]?.id, 'Open');
-                        handlers.setSyncFeedback(`Order set to "Open" in Col AN.`);
-                      } else {
-                        handlers.setSyncFeedback(`Col AN set to "${val}". ${val === 'Message Sent' ? 'WhatsApp button activated in Col AO!' : 'Pending status.'}`);
-                      }
+                      handlers.setSyncFeedback(`Col AN Delivered WhatsApp set to "${val}". ${val === 'Message Sent' ? 'WhatsApp link active in Col AO!' : 'Pending status.'}`);
                       setTimeout(() => handlers.setSyncFeedback(null), 3500);
                     }}
                     className={`text-[10px] rounded px-1.5 py-0.5 font-bold focus:ring-1 focus:outline-none h-6 ${
-                      isItemComplete(order.statusAN) || handlers.anStatuses[currentOrderKey] === 'Complete'
+                      handlers.anStatuses[currentOrderKey] === 'Message Sent'
                         ? 'bg-emerald-100 text-emerald-900 border border-emerald-400 focus:ring-emerald-500'
                         : 'bg-white border border-purple-300 text-slate-800 focus:ring-purple-500'
                     }`}
                   >
                     <option value="Pending">Pending</option>
                     <option value="Message Sent">Message Sent</option>
-                    <option value="Open">🔵 Open</option>
-                    <option value="Complete">🟢 Complete</option>
                   </select>
                 </td>
               )}

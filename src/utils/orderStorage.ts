@@ -146,6 +146,60 @@ export async function loadOrdersFromStorage(): Promise<ProductOrderRow[] | null>
 }
 
 /**
+ * Save all Product Automation / Closed Order rows (Col A to AQ)
+ */
+export async function saveAutomationOrdersToStorage(orders: ProductOrderRow[]): Promise<boolean> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      store.put({ id: 'automation_dataset', data: orders, updatedAt: Date.now() });
+
+      tx.oncomplete = () => {
+        db.close();
+        resolve(true);
+      };
+      tx.onerror = () => {
+        db.close();
+        resolve(false);
+      };
+    });
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * Load all Product Automation / Closed Order rows from IndexedDB
+ */
+export async function loadAutomationOrdersFromStorage(): Promise<ProductOrderRow[] | null> {
+  try {
+    const db = await openDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_NAME, 'readonly');
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.get('automation_dataset');
+
+      req.onsuccess = () => {
+        db.close();
+        if (req.result && Array.isArray(req.result.data) && req.result.data.length > 0) {
+          resolve(req.result.data);
+        } else {
+          resolve(null);
+        }
+      };
+      req.onerror = () => {
+        db.close();
+        resolve(null);
+      };
+    });
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
  * Wipe/clear all orders from storage
  */
 export async function clearOrdersFromStorage(): Promise<boolean> {
@@ -155,6 +209,7 @@ export async function clearOrdersFromStorage(): Promise<boolean> {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       store.delete('current_dataset');
+      store.delete('automation_dataset');
 
       tx.oncomplete = () => {
         db.close();

@@ -50,6 +50,18 @@ export interface ProductOrderRow {
   statusAN?: 'Open' | 'In-Progress' | 'Closed' | 'Complete' | string; // Col AM (39): Open / Close
   dispatchQty?: number;       // Col U (21): Dispatch Qnt
   balanceQty?: number;        // Col V (22): Balance Qnt
+  sheetRowIndex?: number;     // 1-based row number in Google Sheet
+  orderGroupKey?: string;     // Stable group key for multi-item order blocks
+  operationalRemark?: string; // Col X (24): Automation Remark
+  confirmationMsg?: string;   // Col AC (29): Confirmation Msg
+  followUp1?: boolean;        // Col AE (31): Follow-up 1
+  followUp1Timestamp?: string;// Col AF (32): Follow-up 1 Timestamp
+  followUp1Remark?: string;   // Col AG (33): Follow-up 1 Remark
+  followUp2?: boolean;        // Col AH (34): Follow-up 2
+  followUp2Timestamp?: string;// Col AI (35): Follow-up 2 Timestamp
+  followUp2Remark?: string;   // Col AJ (36): Follow-up 2 Remark
+  deliveredWhatsappMsg?: string; // Col AN (40): Delivered WhatsApp Msg
+  deliveryEmail?: string;     // Col AP (42): Delivery Email
 }
 
 export interface GroupedOrder {
@@ -78,6 +90,9 @@ export interface GroupedOrder {
   orderNo: string;
   orderNoTimestamp?: string;
   statusAN?: 'Open' | 'In-Progress' | 'Closed' | 'Complete' | string;
+  sheetRowIndex?: number;
+  operationalRemark?: string;
+  deliveredWhatsappMsg?: string;
 }
 
 export interface ColumnMapItem {

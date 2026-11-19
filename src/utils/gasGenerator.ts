@@ -2840,3 +2840,187 @@ function fmsSetWhatsAppLinkForOrder_(sheet, editedRow) {
   linkCell.setFormula(formula);
 }`;
 }
+
+/**
+ * 2-Way Live Sync Web App Script (doGet + doPost)
+ * Deploy as Web App -> Paste URL in App -> Instant App <-> Google Sheet Write-Back
+ */
+export function generateTwoWayWebAppCode(config: GasScriptConfig = defaultGasConfig): string {
+  return `/**
+ * ============================================================================
+ * GINZA FMS - 2-WAY CENTRALIZED GOOGLE SHEET SYNC WEB APP
+ * Spreadsheet ID: ${config.spreadsheetId}
+ * Tabs: "${config.sourceSheetName}" (Col S Order No) & "${config.targetSheetName}" (Col U, Col AM)
+ *
+ * SETUP STEPS:
+ * 1. Google Sheet open karein -> Extensions -> Apps Script
+ * 2. Yeh code paste karke Save karein
+ * 3. Deploy -> New deployment -> Type: Web app
+ * 4. Execute as: "Me" | Who has access: "Anyone"
+ * 5. Deploy click karke Web App URL copy karein aur App ke "2-Way Sync" modal me paste karein
+ * ============================================================================
+ */
+
+var FMS_SPREADSHEET_ID = "${config.spreadsheetId}";
+var PO_SHEET_NAME = "${config.sourceSheetName}";
+var PA_SHEET_NAME = "${config.targetSheetName}";
+
+function doGet(e) {
+  return ContentService
+    .createTextOutput(JSON.stringify({
+      ok: true,
+      service: "GINZA FMS 2-Way Sync",
+      spreadsheetId: FMS_SPREADSHEET_ID,
+      timestamp: new Date().toISOString()
+    }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(15000);
+  try {
+    var payload = JSON.parse((e && e.postData && e.postData.contents) || "{}");
+    var ss = SpreadsheetApp.openById(FMS_SPREADSHEET_ID);
+    var action = payload.action;
+
+    if (action === "updateOrderNo") {
+      var poSheet = ss.getSheetByName(PO_SHEET_NAME);
+      if (!poSheet) return jsonReply_(false, "Sheet not found: " + PO_SHEET_NAME);
+
+      var targetRow = findMatchingRow_(poSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName);
+      if (targetRow <= 1) {
+        return jsonReply_(false, "Matching row not found in " + PO_SHEET_NAME);
+      }
+
+      // Col S (19) = Order Number in Product Order
+      poSheet.getRange(targetRow, 19).setValue(payload.orderNo || "");
+
+      // Also sync to Product Automation if orderNo is assigned
+      var paSheet = ss.getSheetByName(PA_SHEET_NAME);
+      if (paSheet && payload.orderNo) {
+        var paRow = findMatchingRow_(paSheet, null, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo);
+        if (paRow > 1) {
+          paSheet.getRange(paRow, 19).setValue(payload.orderNo);
+        } else {
+          // Copy cols A:S from Product Order row into Product Automation
+          var rowVals = poSheet.getRange(targetRow, 1, 1, 19).getValues()[0];
+          var newPaRow = new Array(43).fill("");
+          for (var c = 0; c < 19; c++) newPaRow[c] = rowVals[c];
+          newPaRow[18] = payload.orderNo;
+          newPaRow[24] = "APPROVED";
+          newPaRow[25] = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm:ss");
+          newPaRow[38] = "Open"; // Col AM
+          paSheet.appendRow(newPaRow);
+        }
+      }
+
+      return jsonReply_(true, "Order No '" + payload.orderNo + "' saved to Google Sheet Row #" + targetRow);
+    }
+
+    if (action === "updateDispatchQty") {
+      var paSheet = ss.getSheetByName(PA_SHEET_NAME);
+      if (!paSheet) return jsonReply_(false, "Sheet not found: " + PA_SHEET_NAME);
+
+      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo);
+      if (targetRow <= 1) {
+        return jsonReply_(false, "Matching row not found in " + PA_SHEET_NAME);
+      }
+
+      // Col U (21) = Dispatch Qnt
+      paSheet.getRange(targetRow, 21).setValue(Number(payload.dispatchQty) || 0);
+      return jsonReply_(true, "Dispatch Qty updated in Row #" + targetRow);
+    }
+
+    if (action === "updateStatusAM") {
+      var paSheet = ss.getSheetByName(PA_SHEET_NAME);
+      if (!paSheet) return jsonReply_(false, "Sheet not found: " + PA_SHEET_NAME);
+
+      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo);
+      if (targetRow <= 1) {
+        return jsonReply_(false, "Matching row not found in " + PA_SHEET_NAME);
+      }
+
+      // Col AM (39) = Open / Close status
+      paSheet.getRange(targetRow, 39).setValue(payload.statusAM || "Open");
+      return jsonReply_(true, "Col AM set to '" + payload.statusAM + "' in Row #" + targetRow);
+    }
+
+    if (action === "addOrderRow") {
+      var poSheet = ss.getSheetByName(PO_SHEET_NAME);
+      if (!poSheet) return jsonReply_(false, "Sheet not found: " + PO_SHEET_NAME);
+      var d = payload.rowData || {};
+      var rowArr = [
+        d.timestamp || Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd/MM/yyyy HH:mm:ss"),
+        d.customerName || "",
+        d.orderDate || "",
+        d.unit || "",
+        d.itemName || "",
+        d.color || "",
+        d.width || "",
+        d.unitOfItem || "MTR",
+        Number(d.qty) || 0,
+        Number(d.rate) || 0,
+        Number(d.discount) || 0,
+        d.deliveryDate || "",
+        d.remark || "",
+        d.customerNumber || "",
+        d.billingAddress || "",
+        d.deliveryAddress || "",
+        d.salesPerson || "",
+        d.salesPersonContact || "",
+        d.orderNo || ""
+      ];
+      poSheet.appendRow(rowArr);
+      return jsonReply_(true, "New row added to " + PO_SHEET_NAME);
+    }
+
+    return jsonReply_(false, "Unknown action: " + action);
+  } catch (err) {
+    return jsonReply_(false, err.toString());
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function findMatchingRow_(sheet, sheetRowIndex, timestamp, customerName, itemName, orderNo) {
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return -1;
+
+  var norm = function(v) { return String(v || "").trim().toLowerCase(); };
+  var wantCust = norm(customerName);
+  var wantTs = norm(timestamp);
+  var wantItem = norm(itemName);
+  var wantOrder = norm(orderNo);
+
+  // Fast direct check if sheetRowIndex is supplied
+  if (sheetRowIndex && sheetRowIndex >= 2 && sheetRowIndex <= lastRow) {
+    var rVals = sheet.getRange(sheetRowIndex, 1, 1, 19).getDisplayValues()[0];
+    if ((!wantCust || norm(rVals[1]) === wantCust) && (!wantTs || norm(rVals[0]) === wantTs)) {
+      return sheetRowIndex;
+    }
+  }
+
+  // Fallback scan
+  var data = sheet.getRange(2, 1, lastRow - 1, 19).getDisplayValues();
+  for (var i = data.length - 1; i >= 0; i--) {
+    var row = data[i];
+    if (wantOrder && norm(row[18]) === wantOrder && (!wantCust || norm(row[1]) === wantCust)) {
+      return i + 2;
+    }
+    if (wantCust && norm(row[1]) === wantCust && wantTs && norm(row[0]) === wantTs) {
+      if (!wantItem || norm(row[4]).indexOf(wantItem) !== -1) {
+        return i + 2;
+      }
+    }
+  }
+  return -1;
+}
+
+function jsonReply_(ok, message) {
+  return ContentService
+    .createTextOutput(JSON.stringify({ ok: ok, status: ok ? "success" : "error", message: message }))
+    .setMimeType(ContentService.MimeType.JSON);
+}`;
+}
+
