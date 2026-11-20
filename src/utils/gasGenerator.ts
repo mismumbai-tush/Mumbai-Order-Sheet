@@ -2888,18 +2888,19 @@ function doPost(e) {
       var poSheet = ss.getSheetByName(PO_SHEET_NAME);
       if (!poSheet) return jsonReply_(false, "Sheet not found: " + PO_SHEET_NAME);
 
-      var targetRow = findMatchingRow_(poSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName);
+      var targetRow = findMatchingRow_(poSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, null, payload.orderDate);
       if (targetRow <= 1) {
-        return jsonReply_(false, "Matching row not found in " + PO_SHEET_NAME);
+        return jsonReply_(false, "Matching row not found in " + PO_SHEET_NAME + " for " + (payload.customerName || "unknown"));
       }
 
       // Col S (19) = Order Number in Product Order
       poSheet.getRange(targetRow, 19).setValue(payload.orderNo || "");
+      SpreadsheetApp.flush();
 
       // Also sync to Product Automation if orderNo is assigned
       var paSheet = ss.getSheetByName(PA_SHEET_NAME);
       if (paSheet && payload.orderNo) {
-        var paRow = findMatchingRow_(paSheet, null, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo);
+        var paRow = findMatchingRow_(paSheet, null, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo, payload.orderDate);
         if (paRow > 1) {
           paSheet.getRange(paRow, 19).setValue(payload.orderNo);
         } else {
@@ -2913,22 +2914,24 @@ function doPost(e) {
           newPaRow[38] = "Open"; // Col AM
           paSheet.appendRow(newPaRow);
         }
+        SpreadsheetApp.flush();
       }
 
-      return jsonReply_(true, "Order No '" + payload.orderNo + "' saved to Google Sheet Row #" + targetRow);
+      return jsonReply_(true, "Order No '" + payload.orderNo + "' saved to " + PO_SHEET_NAME + " Row #" + targetRow + " (Col S)");
     }
 
     if (action === "updateDispatchQty") {
       var paSheet = ss.getSheetByName(PA_SHEET_NAME);
       if (!paSheet) return jsonReply_(false, "Sheet not found: " + PA_SHEET_NAME);
 
-      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo);
+      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo, payload.orderDate);
       if (targetRow <= 1) {
         return jsonReply_(false, "Matching row not found in " + PA_SHEET_NAME);
       }
 
       // Col U (21) = Dispatch Qnt
       paSheet.getRange(targetRow, 21).setValue(Number(payload.dispatchQty) || 0);
+      SpreadsheetApp.flush();
       return jsonReply_(true, "Dispatch Qty updated in Row #" + targetRow);
     }
 
@@ -2936,13 +2939,14 @@ function doPost(e) {
       var paSheet = ss.getSheetByName(PA_SHEET_NAME);
       if (!paSheet) return jsonReply_(false, "Sheet not found: " + PA_SHEET_NAME);
 
-      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo);
+      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo, payload.orderDate);
       if (targetRow <= 1) {
         return jsonReply_(false, "Matching row not found in " + PA_SHEET_NAME);
       }
 
       // Col AM (39) = Open / Close status
       paSheet.getRange(targetRow, 39).setValue(payload.statusAM || "Open");
+      SpreadsheetApp.flush();
       return jsonReply_(true, "Col AM set to '" + payload.statusAM + "' in Row #" + targetRow);
     }
 
@@ -2972,6 +2976,7 @@ function doPost(e) {
         d.orderNo || ""
       ];
       poSheet.appendRow(rowArr);
+      SpreadsheetApp.flush();
       return jsonReply_(true, "New row added to " + PO_SHEET_NAME);
     }
 
@@ -2983,37 +2988,66 @@ function doPost(e) {
   }
 }
 
-function findMatchingRow_(sheet, sheetRowIndex, timestamp, customerName, itemName, orderNo) {
+function findMatchingRow_(sheet, sheetRowIndex, timestamp, customerName, itemName, orderNo, orderDate) {
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return -1;
 
-  var norm = function(v) { return String(v || "").trim().toLowerCase(); };
+  var norm = function(v) { return String(v || "").replace(/\s+/g, " ").trim().toLowerCase(); };
   var wantCust = norm(customerName);
   var wantTs = norm(timestamp);
   var wantItem = norm(itemName);
   var wantOrder = norm(orderNo);
+  var wantDate = norm(orderDate);
 
-  // Fast direct check if sheetRowIndex is supplied
+  // 1. Fast direct check if sheetRowIndex is supplied (verify customer + item OR timestamp)
   if (sheetRowIndex && sheetRowIndex >= 2 && sheetRowIndex <= lastRow) {
     var rVals = sheet.getRange(sheetRowIndex, 1, 1, 19).getDisplayValues()[0];
-    if ((!wantCust || norm(rVals[1]) === wantCust) && (!wantTs || norm(rVals[0]) === wantTs)) {
+    var rowCust = norm(rVals[1]);
+    var rowItem = norm(rVals[4]);
+    var rowTs = norm(rVals[0]);
+    if (
+      (!wantCust || rowCust === wantCust) &&
+      ((!wantItem || rowItem.indexOf(wantItem) !== -1 || wantItem.indexOf(rowItem) !== -1) ||
+       (!wantTs || rowTs === wantTs))
+    ) {
       return sheetRowIndex;
     }
   }
 
-  // Fallback scan
+  // 2. Fallback scan from newest row to oldest
   var data = sheet.getRange(2, 1, lastRow - 1, 19).getDisplayValues();
   for (var i = data.length - 1; i >= 0; i--) {
     var row = data[i];
-    if (wantOrder && norm(row[18]) === wantOrder && (!wantCust || norm(row[1]) === wantCust)) {
+    var cName = norm(row[1]);
+    var rTs = norm(row[0]);
+    var rDate = norm(row[2]);
+    var rItem = norm(row[4]);
+    var rOrder = norm(row[18]);
+
+    if (wantOrder && rOrder === wantOrder && (!wantCust || cName === wantCust)) {
       return i + 2;
     }
-    if (wantCust && norm(row[1]) === wantCust && wantTs && norm(row[0]) === wantTs) {
-      if (!wantItem || norm(row[4]).indexOf(wantItem) !== -1) {
+    if (wantCust && cName === wantCust && wantTs && rTs === wantTs) {
+      if (!wantItem || rItem.indexOf(wantItem) !== -1 || wantItem.indexOf(rItem) !== -1) {
         return i + 2;
       }
     }
   }
+
+  // 3. Relaxed fallback if CSV timestamp format differed slightly from Sheet display value
+  if (wantCust && wantItem) {
+    for (var j = data.length - 1; j >= 0; j--) {
+      var row2 = data[j];
+      if (
+        norm(row2[1]) === wantCust &&
+        (norm(row2[4]).indexOf(wantItem) !== -1 || wantItem.indexOf(norm(row2[4])) !== -1) &&
+        (!wantDate || norm(row2[2]) === wantDate)
+      ) {
+        return j + 2;
+      }
+    }
+  }
+
   return -1;
 }
 

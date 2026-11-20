@@ -255,12 +255,13 @@ export const PRODUCT_ORDER_TAB_NAME = "Product Order";
 export const SOURCE_RANGE = "Product Automation!A:AQ";
 export const WEB_APP_URL_STORAGE_KEY = "ginza_fms_apps_script_webapp_url_v1";
 
-// Helper: robust CSV string parser handling quoted multiline cells
-export function parseCsvRows(text: string): string[][] {
-  const rows: string[][] = [];
+// Helper: robust CSV parser preserving exact 1-based Google Sheet row numbers
+export function parseCsvRowsWithNumbers(text: string): Array<{ row: string[]; sheetRowIndex: number }> {
+  const rows: Array<{ row: string[]; sheetRowIndex: number }> = [];
   let currentRow: string[] = [];
   let currentCell = '';
   let inQuotes = false;
+  let logicalRowIndex = 1; // 1-based row number in Google Sheet
 
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
@@ -282,8 +283,9 @@ export function parseCsvRows(text: string): string[][] {
       }
       currentRow.push(currentCell.trim());
       if (currentRow.some(c => c.length > 0)) {
-        rows.push(currentRow);
+        rows.push({ row: currentRow, sheetRowIndex: logicalRowIndex });
       }
+      logicalRowIndex++;
       currentRow = [];
       currentCell = '';
     } else {
@@ -294,11 +296,15 @@ export function parseCsvRows(text: string): string[][] {
   if (currentCell.length > 0 || currentRow.length > 0) {
     currentRow.push(currentCell.trim());
     if (currentRow.some(c => c.length > 0)) {
-      rows.push(currentRow);
+      rows.push({ row: currentRow, sheetRowIndex: logicalRowIndex });
     }
   }
 
   return rows;
+}
+
+export function parseCsvRows(text: string): string[][] {
+  return parseCsvRowsWithNumbers(text).map(item => item.row);
 }
 
 const splitLines = (val?: string): string[] => {
@@ -316,26 +322,26 @@ const parseNum = (val?: string): number => {
 // Convert CSV text from Google Sheet into ProductOrderRow[]
 // Auto-detects 43-column Product Automation layout (including multi-line item cells) vs 19-column Product Order layout
 export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOrderRow[] {
-  const parsed = parseCsvRows(csvText);
-  if (parsed.length <= 1) return [];
+  const parsedWithNums = parseCsvRowsWithNumbers(csvText);
+  if (parsedWithNums.length <= 1) return [];
 
   const results: ProductOrderRow[] = [];
-  const header = parsed[0].map(h => (h || '').trim().toLowerCase());
+  const headerRow = parsedWithNums[0].row;
+  const header = headerRow.map(h => (h || '').trim().toLowerCase());
 
   // Detect format based on column count and headers
   const is43ColFormat =
-    parsed[0].length >= 26 ||
+    headerRow.length >= 26 ||
     header.some(h => h.includes('dispatch') || h.includes('balance') || h.includes('open / close'));
   const isRawOrdersForm = !is43ColFormat && (header[2]?.includes('customer') || header[13]?.includes('qty'));
 
-  for (let i = 1; i < parsed.length; i++) {
-    const r = parsed[i];
+  for (let i = 1; i < parsedWithNums.length; i++) {
+    const r = parsedWithNums[i].row;
+    const sheetRowIndex = parsedWithNums[i].sheetRowIndex; // Exact 1-based Google Sheet row number
     if (!r || r.length < 2) continue;
 
     // Skip completely empty or checkbox-only trailing template rows
     if (!r.slice(0, 19).some(v => v.trim() !== '')) continue;
-
-    const sheetRowIndex = i + 1; // 1-based Google Sheet row number (row 1 = header)
 
     if (is43ColFormat) {
       // 43-COLUMN "Product Automation" LAYOUT (Cols A to AQ)
@@ -672,8 +678,10 @@ export interface SheetWritePayload {
   action: 'updateOrderNo' | 'updateDispatchQty' | 'updateStatusAM' | 'addOrderRow';
   sheetRowIndex?: number;
   timestamp?: string;
+  orderDate?: string;
   customerName?: string;
   itemName?: string;
+  qty?: number;
   orderNo?: string;
   dispatchQty?: number;
   statusAM?: string;
@@ -685,14 +693,19 @@ export async function pushOrderUpdateToGoogleSheet(
   webAppUrl: string,
   payload: SheetWritePayload
 ): Promise<{ ok: boolean; message: string }> {
-  if (!webAppUrl || !webAppUrl.trim().startsWith('https://script.google.com/')) {
+  const cleanUrl = (webAppUrl || '').trim();
+  if (!cleanUrl.startsWith('https://script.google.com/')) {
     return { ok: false, message: 'Apps Script Web App URL not configured.' };
+  }
+  if (cleanUrl.endsWith('/dev')) {
+    return { ok: false, message: 'Invalid URL: Use deployed "/exec" Web App URL (not "/dev" test URL).' };
   }
 
   try {
-    // text/plain avoids CORS preflight on Google Apps Script Web Apps
-    const res = await fetch(webAppUrl.trim(), {
+    // text/plain + redirect: follow handles Google Apps Script 302 redirects without CORS preflight
+    const res = await fetch(cleanUrl, {
       method: 'POST',
+      redirect: 'follow',
       headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       body: JSON.stringify(payload)
     });
@@ -701,19 +714,26 @@ export async function pushOrderUpdateToGoogleSheet(
       return { ok: false, message: `Google Apps Script returned HTTP ${res.status}` };
     }
 
+    const rawText = await res.text();
     try {
-      const data = await res.json();
+      const data = JSON.parse(rawText);
       return {
         ok: data.status === 'success' || data.ok === true,
         message: data.message || 'Saved to Google Sheet!'
       };
     } catch {
+      if (rawText.includes('ServiceLogin') || rawText.includes('<!DOCTYPE html>')) {
+        return {
+          ok: false,
+          message: 'Web App permission error: Deploy with Who has access = "Anyone".'
+        };
+      }
       return { ok: true, message: 'Synced to Google Sheet!' };
     }
   } catch (err: any) {
     return {
       ok: false,
-      message: err?.message || 'Network error while writing to Google Sheet.'
+      message: err?.message || 'Network/CORS error while writing to Google Sheet. Ensure Web App access is "Anyone".'
     };
   }
 }

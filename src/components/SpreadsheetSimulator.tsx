@@ -220,6 +220,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   const handleSyncBothLiveSheets = async (silent = false) => {
     setIsFetchingQueryLive(true);
     if (!silent) {
+      setSyncFeedbackTone('success');
       setSyncFeedback(`⚡ Syncing live Google Sheets ("Product Order" & "Product Automation")...`);
     }
     try {
@@ -230,14 +231,14 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         const localAssignedMap = new Map<string, { orderNo: string; orderNoTimestamp?: string }>();
         rawResponsesRef.current.forEach(r => {
           if (r.orderNo && r.orderNo.trim() !== '') {
-            const fp = `${(r.timestamp || '').trim()}___${(r.customerName || '').trim().toLowerCase()}___${(r.itemName || '').trim().toLowerCase()}`;
+            const fp = `${(r.timestamp || '').trim()}___${(r.customerName || '').trim().toLowerCase()}___${(r.itemName || '').trim().toLowerCase()}___${(r.color || '').trim().toLowerCase()}___${Number(r.qty) || 0}`;
             localAssignedMap.set(fp, { orderNo: r.orderNo, orderNoTimestamp: r.orderNoTimestamp });
           }
         });
 
         const mergedPO = res.productOrderRows.map(remoteRow => {
           if (!remoteRow.orderNo || remoteRow.orderNo.trim() === '') {
-            const fp = `${(remoteRow.timestamp || '').trim()}___${(remoteRow.customerName || '').trim().toLowerCase()}___${(remoteRow.itemName || '').trim().toLowerCase()}`;
+            const fp = `${(remoteRow.timestamp || '').trim()}___${(remoteRow.customerName || '').trim().toLowerCase()}___${(remoteRow.itemName || '').trim().toLowerCase()}___${(remoteRow.color || '').trim().toLowerCase()}___${Number(remoteRow.qty) || 0}`;
             const localMatch = localAssignedMap.get(fp);
             if (localMatch) {
               return {
@@ -277,6 +278,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       if (!silent) {
         const openCount = res.automationRows.filter(r => !isItemComplete(r.statusAN)).length;
         const completeCount = res.automationRows.filter(r => isItemComplete(r.statusAN)).length;
+        setSyncFeedbackTone('success');
         setSyncFeedback(
           `✓ Live Google Sheet synced at ${res.fetchedAt} | Product Order: ${res.productOrderRows.length.toLocaleString()} rows | Automation Open: ${openCount} | Closed (AM Complete): ${completeCount}`
         );
@@ -284,6 +286,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     } catch (err: any) {
       console.error('Failed to sync live sheets:', err);
       if (!silent) {
+        setSyncFeedbackTone('warning');
         setSyncFeedback(`Live sync warning: ${err?.message || 'Check network connection'}`);
       }
     } finally {
@@ -631,6 +634,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
   // Status message for simulation feedback
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
+  const [syncFeedbackTone, setSyncFeedbackTone] = useState<'success' | 'warning' | 'error'>('success');
 
   // Modal for previewing WhatsApp dispatch link (Col AO -> AP)
   const [whatsAppModalOrder, setWhatsAppModalOrder] = useState<GroupedOrder | null>(null);
@@ -1085,19 +1089,19 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       ? (targetRow.orderGroupKey || [generatedNo, targetRow.customerName, targetRow.orderDate].map(v => (v || '').trim()).join('_'))
       : orderId;
 
-    setRawResponses(prev =>
-      prev.map(row => {
-        if (row.orderId === orderId) {
-          return {
-            ...row,
-            orderNo: generatedNo,
-            orderNoTimestamp: nowStr,
-            statusAN: row.statusAN || 'Open'
-          };
-        }
-        return row;
-      })
-    );
+    const updatedRaw = rawResponses.map(row => {
+      if (row.orderId === orderId) {
+        return {
+          ...row,
+          orderNo: generatedNo,
+          orderNoTimestamp: nowStr,
+          statusAN: row.statusAN || 'Open'
+        };
+      }
+      return row;
+    });
+    setRawResponses(updatedRaw);
+    saveOrdersToStorage(updatedRaw);
 
     if (targetRow) {
       const promotedRow: ProductOrderRow = {
@@ -1112,34 +1116,41 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
       setAutomationRows(prev => {
         const existsIdx = prev.findIndex(r => r.orderId === orderId || (r.orderGroupKey && r.orderGroupKey === newGroupKey));
-        if (existsIdx >= 0) {
-          return prev.map((r, i) => (i === existsIdx ? { ...r, orderNo: generatedNo, orderNoTimestamp: nowStr } : r));
-        }
-        return [promotedRow, ...prev];
+        const nextAuto = existsIdx >= 0
+          ? prev.map((r, i) => (i === existsIdx ? { ...r, orderNo: generatedNo, orderNoTimestamp: nowStr } : r))
+          : [promotedRow, ...prev];
+        saveAutomationOrdersToStorage(nextAuto);
+        return nextAuto;
       });
     }
 
-    let sheetNote = '';
     if (webAppUrl && targetRow) {
+      setSyncFeedbackTone('success');
+      setSyncFeedback(`⏳ Saving Order No "${generatedNo}" to Google Sheet Product Order Col S...`);
       const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
         action: 'updateOrderNo',
         sheetRowIndex: targetRow.sheetRowIndex,
         timestamp: targetRow.timestamp,
+        orderDate: targetRow.orderDate,
         customerName: targetRow.customerName,
         itemName: targetRow.itemName,
+        qty: targetRow.qty,
         orderNo: generatedNo
       });
-      sheetNote = writeRes.ok
-        ? ' & saved in Google Sheet Col S ✓'
-        : ` (Google Sheet write note: ${writeRes.message})`;
-    } else {
-      sheetNote = ' (Saved in App! Click "2-Way Write-Back" to also auto-write into Google Sheet Col S)';
-    }
 
-    setSyncFeedback(
-      `Order No "${generatedNo}" assigned for ${affectedItem}! Active in "Product Automation (Open)"${sheetNote}`
-    );
-    setTimeout(() => setSyncFeedback(null), 5000);
+      if (writeRes.ok) {
+        setSyncFeedbackTone('success');
+        setSyncFeedback(`✓ Order No "${generatedNo}" (${affectedItem}) saved in App + Google Sheet Col S! (${writeRes.message})`);
+      } else {
+        setSyncFeedbackTone('error');
+        setSyncFeedback(`⚠️ App me save hua, lekin Google Sheet write failed: ${writeRes.message}`);
+      }
+    } else {
+      setSyncFeedbackTone('warning');
+      setSyncFeedback(
+        `⚠️ Order No "${generatedNo}" sirf App me save hua hai! Google Sheet "Product Order" Col S me save karne ke liye "2-Way Sheet Setup" URL add karein.`
+      );
+    }
   };
 
   // Generate Order No for all pending rows in Product Order
@@ -1251,20 +1262,32 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       );
 
       if (webAppUrl) {
-        await pushOrderUpdateToGoogleSheet(webAppUrl, {
+        const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
           action: 'updateOrderNo',
           sheetRowIndex: matchedRow.sheetRowIndex,
           timestamp: matchedRow.timestamp,
+          orderDate: matchedRow.orderDate,
           customerName: matchedRow.customerName,
           itemName: matchedRow.itemName,
+          qty: matchedRow.qty,
           orderNo: newVal
         });
+        setSyncFeedbackTone(writeRes.ok ? 'success' : 'error');
+        setSyncFeedback(
+          writeRes.ok
+            ? `✓ Order No for ${editingOrderNo.po || matchedRow?.customerName} set to "${newVal}" in App + Google Sheet Col S!`
+            : `⚠️ App me save hua, Google Sheet write error: ${writeRes.message}`
+        );
+      } else {
+        setSyncFeedbackTone('warning');
+        setSyncFeedback(`⚠️ Order No "${newVal}" sirf App me save hua! Google Sheet Col S write-back ke liye "2-Way Sheet Setup" karein.`);
       }
+    } else {
+      setSyncFeedbackTone('success');
+      setSyncFeedback(`Order No for ${editingOrderNo.po || ''} set to "${newVal}"!`);
     }
 
-    setSyncFeedback(`Order No for ${editingOrderNo.po || matchedRow?.customerName} set to "${newVal}" in Col S!`);
     setEditingOrderNo(null);
-    setTimeout(() => setSyncFeedback(null), 4000);
   };
 
   // Handlers for Operational Columns W, X, AC, AE, AF, AG, AH, AI, AJ, AL, AN
@@ -2607,12 +2630,42 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
         {/* Sync feedback notification */}
         {syncFeedback && (
-          <div className="p-2.5 bg-emerald-50 border-b border-emerald-200 flex items-center justify-between text-xs text-emerald-900 animate-in fade-in duration-150">
+          <div className={`p-2.5 border-b flex flex-wrap items-center justify-between gap-2 text-xs animate-in fade-in duration-150 ${
+            syncFeedbackTone === 'error'
+              ? 'bg-rose-50 border-rose-200 text-rose-950'
+              : syncFeedbackTone === 'warning'
+                ? 'bg-amber-50 border-amber-300 text-amber-950'
+                : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+          }`}>
             <div className="flex items-center gap-2">
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+              {syncFeedbackTone === 'success'
+                ? <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                : <AlertTriangle className={`w-4 h-4 shrink-0 ${syncFeedbackTone === 'error' ? 'text-rose-600' : 'text-amber-600'}`} />}
               <span className="font-medium">{syncFeedback}</span>
             </div>
-            <span className="text-[11px] text-emerald-700 font-mono">Saved &amp; Synced ✓</span>
+            <div className="flex items-center gap-2 ml-auto">
+              {(syncFeedbackTone === 'warning' || syncFeedbackTone === 'error') && (
+                <button
+                  type="button"
+                  onClick={() => setShowTwoWaySyncModal(true)}
+                  className="px-2.5 py-1 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded-md text-[11px] flex items-center gap-1 cursor-pointer shadow-2xs"
+                >
+                  <Link2 className="w-3 h-3" />
+                  <span>Setup 2-Way Sheet Write</span>
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setSyncFeedback(null);
+                  setSyncFeedbackTone('success');
+                }}
+                className="p-0.5 opacity-60 hover:opacity-100 cursor-pointer"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -4033,7 +4086,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
               <div className="space-y-1.5">
                 <label className="text-[11px] font-bold text-slate-800 block">
-                  Step 2: Paste Deployed Google Apps Script Web App URL
+                  Step 2: Paste Deployed Google Apps Script Web App URL (Target Sheet: <span className="font-mono text-emerald-700">1xSSZ6DyQarQJOd8UpOfCV-tjdKL1oQq_IKuXJkcRv5Q</span>)
                 </label>
                 <input
                   type="url"
@@ -4042,6 +4095,11 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   placeholder="https://script.google.com/macros/s/AKfycb.../exec"
                   className="w-full px-3 py-2 text-xs border border-slate-300 rounded-lg font-mono focus:ring-1 focus:ring-emerald-500 focus:outline-none"
                 />
+                {webAppUrl.trim().endsWith('/dev') && (
+                  <p className="text-[11px] text-rose-600 font-semibold">
+                    ⚠️ Aapne &quot;/dev&quot; test URL paste kiya hai. Deploy ➔ New deployment karke &quot;/exec&quot; URL paste karein!
+                  </p>
+                )}
               </div>
 
               <div className="pt-2 border-t border-slate-200 flex items-center justify-between gap-2">
@@ -4051,18 +4109,21 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   onClick={async () => {
                     setTestingWebApp(true);
                     try {
-                      const resp = await fetch(webAppUrl.trim());
+                      const resp = await fetch(webAppUrl.trim(), { redirect: 'follow' });
                       const data = await resp.json();
                       if (data.ok) {
+                        setSyncFeedbackTone('success');
                         setSyncFeedback('✓ 2-Way Apps Script Web App Verified & Connected!');
                       } else {
+                        setSyncFeedbackTone('warning');
                         setSyncFeedback('Web App responded, check spreadsheet permissions.');
                       }
                     } catch (err: any) {
+                      setSyncFeedbackTone('error');
                       setSyncFeedback(`Web App ping failed: ${err?.message || 'Ensure access is set to Anyone'}`);
                     } finally {
                       setTestingWebApp(false);
-                      setTimeout(() => setSyncFeedback(null), 4000);
+                      setTimeout(() => setSyncFeedback(null), 5000);
                     }
                   }}
                   className="px-3 py-1.5 border border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100 rounded-lg font-semibold text-xs disabled:opacity-50 cursor-pointer"
@@ -4085,12 +4146,21 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   <button
                     type="button"
                     onClick={() => {
+                      const clean = webAppUrl.trim();
+                      setWebAppUrl(clean);
                       try {
-                        localStorage.setItem(WEB_APP_URL_STORAGE_KEY, webAppUrl.trim());
+                        localStorage.setItem(WEB_APP_URL_STORAGE_KEY, clean);
                       } catch {}
                       setShowTwoWaySyncModal(false);
-                      setSyncFeedback(webAppUrl.trim() ? '✓ 2-Way Google Sheet Write-Back Saved!' : '2-Way URL cleared.');
-                      setTimeout(() => setSyncFeedback(null), 4000);
+                      setSyncFeedbackTone(clean.endsWith('/dev') ? 'warning' : 'success');
+                      setSyncFeedback(
+                        clean
+                          ? clean.endsWith('/dev')
+                            ? '⚠️ Warning: "/dev" URL saved. Please replace with "/exec" Web App deployment URL.'
+                            : '✓ 2-Way Google Sheet Write-Back URL Saved! Ab Order No Col S direct Google Sheet me save hoga.'
+                          : '2-Way URL cleared.'
+                      );
+                      setTimeout(() => setSyncFeedback(null), 5000);
                     }}
                     className="px-4 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-lg text-xs cursor-pointer"
                   >
