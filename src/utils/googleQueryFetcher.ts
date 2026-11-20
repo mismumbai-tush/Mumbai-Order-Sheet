@@ -254,6 +254,7 @@ export const ORDERS_TAB_NAME = "Orders";
 export const PRODUCT_ORDER_TAB_NAME = "Product Order";
 export const SOURCE_RANGE = "Product Automation!A:AQ";
 export const WEB_APP_URL_STORAGE_KEY = "ginza_fms_apps_script_webapp_url_v1";
+export const DEFAULT_WEB_APP_URL = "https://script.google.com/macros/s/AKfycbycM-llboHCSvfKSAWDo2Y6vnigwX8HYxsiFbEY8Zd3djvDu7Sf1TwOh8hMGr1TLzsGnQ/exec";
 
 // Helper: robust CSV parser preserving exact 1-based Google Sheet row numbers
 export function parseCsvRowsWithNumbers(text: string): Array<{ row: string[]; sheetRowIndex: number }> {

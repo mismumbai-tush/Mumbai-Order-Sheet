@@ -18,6 +18,7 @@ import {
   QUERY_SPREADSHEET_ID,
   SOURCE_TAB_NAME as QUERY_SOURCE_TAB_NAME,
   WEB_APP_URL_STORAGE_KEY,
+  DEFAULT_WEB_APP_URL,
   fetchLiveGoogleQueryData,
   fetchBothLiveGoogleSheets,
   pushOrderUpdateToGoogleSheet
@@ -131,9 +132,14 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   const [autoSyncEnabled, setAutoSyncEnabled] = useState<boolean>(true);
   const [webAppUrl, setWebAppUrl] = useState<string>(() => {
     try {
-      return localStorage.getItem(WEB_APP_URL_STORAGE_KEY) || '';
+      const saved = localStorage.getItem(WEB_APP_URL_STORAGE_KEY);
+      if (saved && saved.trim() !== '') {
+        return saved.trim();
+      }
+      localStorage.setItem(WEB_APP_URL_STORAGE_KEY, DEFAULT_WEB_APP_URL);
+      return DEFAULT_WEB_APP_URL;
     } catch {
-      return '';
+      return DEFAULT_WEB_APP_URL;
     }
   });
   const [showTwoWaySyncModal, setShowTwoWaySyncModal] = useState(false);
@@ -4379,13 +4385,16 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   <button
                     type="button"
                     onClick={() => {
-                      setWebAppUrl('');
-                      try { localStorage.removeItem(WEB_APP_URL_STORAGE_KEY); } catch {}
-                      setShowTwoWaySyncModal(false);
+                      setWebAppUrl(DEFAULT_WEB_APP_URL);
+                      try { localStorage.setItem(WEB_APP_URL_STORAGE_KEY, DEFAULT_WEB_APP_URL); } catch {}
+                      setSyncFeedbackTone('success');
+                      setSyncFeedback('✓ Default 2-Way Web App URL restored & saved!');
+                      setTimeout(() => setSyncFeedback(null), 4000);
                     }}
-                    className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-800 cursor-pointer"
+                    className="px-3 py-1.5 text-xs text-slate-600 hover:text-slate-900 font-medium cursor-pointer"
+                    title="Restore built-in default 2-Way Google Sheet URL"
                   >
-                    Clear URL
+                    Reset Default URL
                   </button>
                   <button
                     type="button"
