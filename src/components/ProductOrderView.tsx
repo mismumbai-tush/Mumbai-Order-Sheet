@@ -32,7 +32,9 @@ import {
   Loader2,
   ArrowUpDown,
   Pin,
-  Bell
+  Bell,
+  EyeOff,
+  Eye
 } from 'lucide-react';
 
 export type SearchBasisMode = 'customer_or_order' | 'customer' | 'order_no' | 'all';
@@ -59,6 +61,9 @@ interface ProductOrderViewProps {
   lastSyncedAt?: string | null;
   webAppConfigured?: boolean;
   onOpenTwoWaySyncModal?: () => void;
+  onOpenColumnManager?: () => void;
+  onHideColumn?: (colLetter: string) => void;
+  onShowAllColumns?: () => void;
 }
 
 // Robust helper to parse order date and timestamp into year, month, day
@@ -132,7 +137,10 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
   onPurgeDelhiAndLock,
   lastSyncedAt,
   webAppConfigured,
-  onOpenTwoWaySyncModal
+  onOpenTwoWaySyncModal,
+  onOpenColumnManager,
+  onHideColumn,
+  onShowAllColumns
 }) => {
   const [filterPendingOnly, setFilterPendingOnly] = useState(false);
   const [filterTodayYesterdayOnly, setFilterTodayYesterdayOnly] = useState(false);
@@ -855,8 +863,43 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
           </div>
         </div>
 
-        {/* Right Side: Action Controls */}
+        {/* Right Side: Column Hide/Show + Add Row Controls */}
         <div className="flex flex-wrap items-center gap-2 ml-auto">
+          {(() => {
+            const visibleCount = productOrderColumns.filter(c => !visibleCols || visibleCols[c.colLetter] !== false).length;
+            const hiddenCount = productOrderColumns.length - visibleCount;
+            return (
+              <>
+                {onOpenColumnManager && (
+                  <button
+                    type="button"
+                    onClick={onOpenColumnManager}
+                    className={`px-2.5 py-1 rounded-lg border text-xs font-bold shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer ${
+                      hiddenCount > 0
+                        ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+                    }`}
+                    title="Select columns to Hide or Show in Product Order"
+                  >
+                    <Columns3 className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Hide / Show Columns ({visibleCount}/{productOrderColumns.length})</span>
+                  </button>
+                )}
+                {hiddenCount > 0 && onShowAllColumns && (
+                  <button
+                    type="button"
+                    onClick={onShowAllColumns}
+                    className="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                    title="Show all hidden columns in Product Order"
+                  >
+                    <Eye className="w-3 h-3" />
+                    <span>Unhide All ({hiddenCount})</span>
+                  </button>
+                )}
+              </>
+            );
+          })()}
+
           {/* + Add Row */}
           <button
             onClick={() => setShowAddModal(true)}
@@ -884,6 +927,7 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
         setInputOrderNos={setInputOrderNos}
         onGenerateOrderNo={onGenerateOrderNo}
         onNavigateToAutomation={onNavigateToAutomation}
+        onHideColumn={onHideColumn}
       />
 
       {/* 5. Pagination Bar */}
@@ -1325,6 +1369,7 @@ interface ProductOrderTableGridProps {
   setInputOrderNos: React.Dispatch<React.SetStateAction<Record<string, string>>>;
   onGenerateOrderNo: (orderId: string, customNo?: string) => void;
   onNavigateToAutomation: () => void;
+  onHideColumn?: (colLetter: string) => void;
 }
 
 const FREEZE_SEQUENCE: Array<'#' | 'A' | 'B' | 'C' | 'D' | 'E'> = ['#', 'A', 'B', 'C', 'D', 'E'];
@@ -1343,7 +1388,8 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
   inputOrderNos,
   setInputOrderNos,
   onGenerateOrderNo,
-  onNavigateToAutomation
+  onNavigateToAutomation,
+  onHideColumn
 }) => {
   const visibleColumns = useMemo(
     () => productOrderColumns.filter(col => !visibleCols || visibleCols[col.colLetter] !== false),
@@ -1606,9 +1652,9 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
                 <th
                   key={col.id}
                   style={sProps.style}
-                  className={`px-2 py-0.5 text-center font-mono whitespace-nowrap ${tint} ${sProps.extraClass}`}
+                  className={`px-2 py-0.5 text-center font-mono whitespace-nowrap group/col ${tint} ${sProps.extraClass}`}
                 >
-                  <span className="inline-flex items-center gap-1">
+                  <span className="inline-flex items-center justify-center gap-1 w-full">
                     <span>Col {col.colLetter}</span>
                     {frozenSet.has(col.colLetter) && (
                       <Pin className="w-2.5 h-2.5 text-sky-300 inline" />
@@ -1617,6 +1663,19 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
                       <span className="text-[9px] text-amber-400 font-normal opacity-80" title="Locked: Streamed from =QUERY(...) formula">🔒</span>
                     ) : (
                       <span className="text-[9px] text-emerald-300 font-bold" title="Unlocked: Enter or Generate Order Number">🔓</span>
+                    )}
+                    {onHideColumn && visibleColumns.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onHideColumn(col.colLetter);
+                        }}
+                        className="ml-auto p-0.5 rounded opacity-55 hover:opacity-100 hover:bg-rose-600/80 text-slate-300 hover:text-white transition-all cursor-pointer"
+                        title={`Hide Col ${col.colLetter} (${col.label})`}
+                      >
+                        <EyeOff className="w-2.5 h-2.5" />
+                      </button>
                     )}
                   </span>
                 </th>

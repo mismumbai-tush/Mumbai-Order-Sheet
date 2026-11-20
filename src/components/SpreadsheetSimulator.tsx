@@ -2668,31 +2668,33 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
           {/* Right Controls Group in Single Line */}
           <div className="flex items-center gap-1.5 shrink-0">
-            {/* View Mode Switch */}
-            <div className="flex items-center p-0.5 bg-slate-200/80 rounded-lg text-xs shrink-0">
-              <button
-                onClick={() => setViewMode('merged')}
-                className={`px-2 py-1 rounded-md transition-all font-semibold ${
-                  viewMode === 'merged'
-                    ? 'bg-white text-emerald-800 shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-                title="A-E & N-X Vertically Merged with Individual Product Item Rows"
-              >
-                ⚡ Merged Visual View
-              </button>
-              <button
-                onClick={() => setViewMode('unmerged')}
-                className={`px-2 py-1 rounded-md transition-all font-medium ${
-                  viewMode === 'unmerged'
-                    ? 'bg-white text-slate-900 shadow-xs font-semibold'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-                title="100% Flat Row-Wise View (Independent Row Data)"
-              >
-                Flat Unmerged
-              </button>
-            </div>
+            {/* View Mode Switch (Applicable for Automation & Closed Orders) */}
+            {(activeSheetTab === 'automation' || activeSheetTab === 'closed') && (
+              <div className="flex items-center p-0.5 bg-slate-200/80 rounded-lg text-xs shrink-0">
+                <button
+                  onClick={() => setViewMode('merged')}
+                  className={`px-2 py-1 rounded-md transition-all font-semibold ${
+                    viewMode === 'merged'
+                      ? 'bg-white text-emerald-800 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  title="A-E & N-X Vertically Merged with Individual Product Item Rows"
+                >
+                  ⚡ Merged Visual View
+                </button>
+                <button
+                  onClick={() => setViewMode('unmerged')}
+                  className={`px-2 py-1 rounded-md transition-all font-medium ${
+                    viewMode === 'unmerged'
+                      ? 'bg-white text-slate-900 shadow-xs font-semibold'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                  title="100% Flat Row-Wise View (Independent Row Data)"
+                >
+                  Flat Unmerged
+                </button>
+              </div>
+            )}
 
             {/* Columns Hide / Show Button (Per Active Tab) */}
             <button
@@ -2834,6 +2836,20 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             lastSyncedAt={lastSyncedAt}
             webAppConfigured={Boolean(webAppUrl)}
             onOpenTwoWaySyncModal={() => setShowTwoWaySyncModal(true)}
+            onOpenColumnManager={() => setShowColManager(true)}
+            onHideColumn={(colLetter) => {
+              setVisibleColsByTab(prev => ({
+                ...prev,
+                product_order: { ...prev.product_order, [colLetter]: false }
+              }));
+              setSyncFeedback(`Column ${colLetter} hidden in Product Order. Click "Hide / Show Columns" or "Unhide All" to restore.`);
+              setTimeout(() => setSyncFeedback(null), 3000);
+            }}
+            onShowAllColumns={() => {
+              const all: Record<string, boolean> = {};
+              productOrderColumns.forEach(c => { all[c.colLetter] = true; });
+              setVisibleColsByTab(prev => ({ ...prev, product_order: all }));
+            }}
           />
         ) : (
           <div
