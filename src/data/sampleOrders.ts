@@ -74,6 +74,6 @@ export const fmsColumnMapping: ColumnMapItem[] = [
   { sheetCol: "AM", colIndex1Based: 39, arrayIndex0Based: 38, name: "Open / Close", category: "item-row", description: "Lifecycle Status: Open, In-Progress, Complete", example: "Open" },
   { sheetCol: "AN", colIndex1Based: 40, arrayIndex0Based: 39, name: "Status AN / WA Msg", category: "header-merge", description: "Lifecycle / WA Status: Complete, Open, Message Sent", example: "Complete" },
   { sheetCol: "AO", colIndex1Based: 41, arrayIndex0Based: 40, name: "Whatspp Link", category: "header-merge", description: "Dispatch WhatsApp link", example: "Sent Message" },
-  { sheetCol: "AP", colIndex1Based: 42, arrayIndex0Based: 41, name: "Delivery Email", category: "header-merge", description: "Delivery email address", example: "orders@ginzalimited.com" },
-  { sheetCol: "AQ", colIndex1Based: 43, arrayIndex0Based: 42, name: "Delivery Email Link", category: "header-merge", description: "Mailto link", example: "Send Email" }
+  { sheetCol: "AP", colIndex1Based: 42, arrayIndex0Based: 41, name: "Delivery Email", category: "header-merge", description: "Delivery email draft trigger (Pending / Mail Sent)", example: "Sent" },
+  { sheetCol: "AQ", colIndex1Based: 43, arrayIndex0Based: 42, name: "Delivery Email Link", category: "header-merge", description: "Gmail Draft status & direct Drafts link", example: "✅ Draft Created in Gmail" }
 ];

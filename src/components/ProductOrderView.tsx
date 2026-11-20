@@ -1622,17 +1622,17 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
 
   return (
     <div className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-180px)] max-h-[85vh]' : 'h-[640px] max-h-[76vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}>
-      <table className="w-full border-separate border-spacing-0 text-xs text-left">
+      <table className="table-auto w-max min-w-full border-separate border-spacing-0 text-xs text-left">
         {/* Sticky Header Rows */}
         <thead className="sticky top-0 z-30 select-none font-mono text-[11px]">
           {/* Strip 1: Google Sheet Column Letters */}
           <tr className="bg-slate-900 text-slate-400 text-[10px]">
             {(() => {
-              const sProps = getStickyHeaderProps('#', { minWidth: '44px', width: '44px' });
+              const sProps = getStickyHeaderProps('#', { minWidth: '40px', width: '40px' });
               return (
                 <th
                   style={sProps.style}
-                  className={`w-11 px-2 py-0.5 text-center bg-slate-950 text-slate-400 border-r border-b border-slate-800 ${sProps.extraClass}`}
+                  className={`w-10 px-1.5 py-0.5 text-center bg-slate-950 text-slate-400 border-r border-b border-slate-800 ${sProps.extraClass}`}
                 >
                   #
                 </th>
@@ -1646,13 +1646,13 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
               else if (['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'].includes(col.colLetter)) tint = 'bg-amber-950 text-amber-300 border-r border-b border-amber-800 font-bold';
               else tint = 'bg-indigo-950 text-indigo-300 border-r border-b border-indigo-900';
 
-              const sProps = getStickyHeaderProps(col.colLetter, { minWidth: col.minWidth || '110px' });
+              const sProps = getStickyHeaderProps(col.colLetter);
 
               return (
                 <th
                   key={col.id}
                   style={sProps.style}
-                  className={`px-2 py-0.5 text-center font-mono whitespace-nowrap group/col ${tint} ${sProps.extraClass}`}
+                  className={`px-1.5 py-0.5 text-center font-mono whitespace-nowrap group/col ${tint} ${sProps.extraClass}`}
                 >
                   <span className="inline-flex items-center justify-center gap-1 w-full">
                     <span>Col {col.colLetter}</span>
@@ -1686,12 +1686,12 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
           {/* Strip 2: Exact Column Names (Measured for Exact Frozen Offsets) */}
           <tr className="border-t border-slate-700">
             {(() => {
-              const sProps = getStickyHeaderProps('#', { minWidth: '44px', width: '44px' });
+              const sProps = getStickyHeaderProps('#', { minWidth: '40px', width: '40px' });
               return (
                 <th
                   ref={(el) => { headerRefs.current['#'] = el; }}
                   style={sProps.style}
-                  className={`w-11 px-2 py-1.5 text-center bg-slate-900 text-slate-100 border-r border-b-2 border-b-slate-950 border-slate-800 font-bold ${sProps.extraClass}`}
+                  className={`w-10 px-1.5 py-1 text-center bg-slate-900 text-slate-100 border-r border-b-2 border-b-slate-950 border-slate-800 font-bold ${sProps.extraClass}`}
                 >
                   #
                 </th>
@@ -1704,14 +1704,14 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
               else if (['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'].includes(col.colLetter)) bgHead = 'bg-amber-800 text-amber-100 border-r border-b-2 border-b-slate-950 border-amber-700 font-extrabold';
               else bgHead = 'bg-indigo-900 text-indigo-100 border-r border-b-2 border-b-slate-950 border-indigo-800 font-bold';
 
-              const sProps = getStickyHeaderProps(col.colLetter, { minWidth: col.minWidth || '110px' });
+              const sProps = getStickyHeaderProps(col.colLetter);
 
               return (
                 <th
                   key={col.id}
                   ref={(el) => { headerRefs.current[col.colLetter] = el; }}
                   style={sProps.style}
-                  className={`px-2.5 py-1.5 whitespace-nowrap ${bgHead} ${sProps.extraClass}`}
+                  className={`px-2 py-1 whitespace-nowrap ${bgHead} ${sProps.extraClass}`}
                 >
                   <div className="flex items-center justify-between gap-1">
                     <span className="font-semibold">{col.label}</span>
@@ -1771,7 +1771,7 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
                   {/* # Google Sheet Row Number Column */}
                   <td
                     style={hashProps.style}
-                    className={`w-11 px-2 py-0.5 text-center font-mono font-bold text-slate-500 border-r border-b border-slate-200 text-[11px] ${hashProps.extraClass}`}
+                    className={`w-10 px-1.5 py-0.5 text-center font-mono font-bold text-slate-500 border-r border-b border-slate-200 text-[11px] ${hashProps.extraClass}`}
                     title={row.sheetRowIndex ? `Google Sheet Row #${row.sheetRowIndex}` : `Row ${rowIndex}`}
                   >
                     {row.sheetRowIndex || rowIndex}
@@ -1787,8 +1787,8 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
                       <td
                         key={col.id}
                         style={cProps.style}
-                        className={`px-2 py-0.5 border-r border-b border-slate-200 whitespace-nowrap ${
-                          col.colLetter === 'S' ? 'px-2.5 border-slate-300' : ''
+                        className={`px-1.5 py-0.5 border-r border-b border-slate-200 whitespace-nowrap ${
+                          col.colLetter === 'S' ? 'px-2 border-slate-300' : ''
                         } ${cProps.extraClass}`}
                       >
                         {renderCellContent(col.colLetter, row, hasOrderNo)}

@@ -53,6 +53,8 @@ export interface ProductOrderRow {
   sheetRowIndex?: number;     // 1-based row number in Google Sheet
   orderGroupKey?: string;     // Stable group key for multi-item order blocks
   operationalRemark?: string; // Col X (24): Automation Remark
+  confirmationMail?: string;  // Col AA (27): Confirmation Mail ("Pending" | "Sent")
+  mailStatus?: string;        // Col AB (28): Mail Status ("Sent Successfully" | "No Mail ID Found" | ...)
   confirmationMsg?: string;   // Col AC (29): Confirmation Msg
   followUp1?: boolean;        // Col AE (31): Follow-up 1
   followUp1Timestamp?: string;// Col AF (32): Follow-up 1 Timestamp
@@ -61,7 +63,8 @@ export interface ProductOrderRow {
   followUp2Timestamp?: string;// Col AI (35): Follow-up 2 Timestamp
   followUp2Remark?: string;   // Col AJ (36): Follow-up 2 Remark
   deliveredWhatsappMsg?: string; // Col AN (40): Delivered WhatsApp Msg
-  deliveryEmail?: string;     // Col AP (42): Delivery Email
+  deliveryEmail?: string;     // Col AP (42): Delivery Email ("Pending" | "Sent")
+  deliveryEmailStatus?: string; // Col AQ (43): Delivery Email Link / Draft Status ("Pending" | "✅ Draft Created in Gmail" | ...)
 }
 
 export interface GroupedOrder {
@@ -89,10 +92,14 @@ export interface GroupedOrder {
   branchHeadEmail?: string;
   orderNo: string;
   orderNoTimestamp?: string;
+  confirmationMail?: string;
+  mailStatus?: string;
   statusAN?: 'Open' | 'In-Progress' | 'Closed' | 'Complete' | string;
   sheetRowIndex?: number;
   operationalRemark?: string;
   deliveredWhatsappMsg?: string;
+  deliveryEmail?: string;
+  deliveryEmailStatus?: string;
 }
 
 export interface ColumnMapItem {

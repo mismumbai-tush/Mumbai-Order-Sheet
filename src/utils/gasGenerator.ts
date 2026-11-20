@@ -2980,6 +2980,292 @@ function doPost(e) {
       return jsonReply_(true, "New row added to " + PO_SHEET_NAME);
     }
 
+    if (action === "sendConfirmationMail") {
+      var paSheet = ss.getSheetByName(PA_SHEET_NAME);
+      if (!paSheet) return jsonReplyExtra_(false, "Sheet not found: " + PA_SHEET_NAME, { mailStatus: "Error Sending Mail: Sheet not found" });
+
+      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo, payload.orderDate);
+
+      var email = targetRow > 1 ? String(paSheet.getRange(targetRow, 20).getValue() || payload.email || "").trim() : String(payload.email || "").trim();
+      var orderNo = targetRow > 1 ? (paSheet.getRange(targetRow, 19).getValue() || payload.orderNo || "") : (payload.orderNo || "");
+      var customerName = targetRow > 1 ? (paSheet.getRange(targetRow, 2).getValue() || payload.customerName || "") : (payload.customerName || "");
+      var orderDate = targetRow > 1 ? (paSheet.getRange(targetRow, 3).getValue() || payload.orderDate || "") : (payload.orderDate || "");
+      var address = targetRow > 1 ? (paSheet.getRange(targetRow, 15).getValue() || payload.billingAddress || "") : (payload.billingAddress || "");
+      var salesPersonName = String(targetRow > 1 ? (paSheet.getRange(targetRow, 17).getValue() || payload.salesPerson || "") : (payload.salesPerson || "")).trim();
+
+      if (targetRow > 1) {
+        paSheet.getRange(targetRow, 27).setValue(payload.colAA || "Sent");
+      }
+
+      if (!email) {
+        if (targetRow > 1) {
+          paSheet.getRange(targetRow, 28).setValue("No Mail ID Found");
+          SpreadsheetApp.flush();
+        }
+        return jsonReplyExtra_(false, "No Mail ID Found in Col T", { mailStatus: "No Mail ID Found" });
+      }
+
+      var itemNames = [], colors = [], widths = [], units = [], qtys = [], rates = [];
+      if (targetRow > 1) {
+        var rawItem = String(paSheet.getRange(targetRow, 5).getValue() || "");
+        if (rawItem.trim() !== "") {
+          itemNames = rawItem.split(/\\r?\\n/);
+          colors = String(paSheet.getRange(targetRow, 6).getValue() || "").split(/\\r?\\n/);
+          widths = String(paSheet.getRange(targetRow, 7).getValue() || "").split(/\\r?\\n/);
+          units = String(paSheet.getRange(targetRow, 4).getValue() || "").split(/\\r?\\n/);
+          qtys = String(paSheet.getRange(targetRow, 9).getValue() || "").split(/\\r?\\n/);
+          rates = String(paSheet.getRange(targetRow, 10).getValue() || "").split(/\\r?\\n/);
+        }
+      }
+      if (itemNames.length === 0 && payload.items && payload.items.length > 0) {
+        for (var k = 0; k < payload.items.length; k++) {
+          var pit = payload.items[k];
+          itemNames.push(pit.itemName || "");
+          colors.push(pit.color || "");
+          widths.push(pit.width || "");
+          units.push(pit.unit || pit.unitOfItem || "");
+          qtys.push(String(pit.qty || 0));
+          rates.push(String(pit.rate || 0));
+        }
+      }
+
+      var formattedDate = orderDate instanceof Date
+        ? Utilities.formatDate(orderDate, Session.getScriptTimeZone(), "dd-MM-yyyy")
+        : String(orderDate || "");
+
+      var salesPersonEmails = {
+        "Amit Korgaonkar": "amit.korgaonkar@ginzalimited.com",
+        "Santosh Pachratkar": "santosh.pachratkar@ginzalimited.com",
+        "Rakesh Jain": "rakesh.jain@ginzalimited.com",
+        "Kamlesh Sutar": "kamlesh.sutar@ginzalimited.com",
+        "Pradeep Jadhav": "pradeep.jadhav@ginzalimited.com",
+        "Nikam": "mis.mumbai@ginzalimited.com"
+      };
+      var salesPersonEmail = salesPersonEmails[salesPersonName] || null;
+
+      var rowsHTML = "";
+      var totalQty = 0;
+      for (var m = 0; m < itemNames.length; m++) {
+        var qNum = parseFloat(qtys[m]) || 0;
+        totalQty += qNum;
+        rowsHTML +=
+          '<tr>' +
+          '<td style="text-align:center;">' + (m + 1) + '</td>' +
+          '<td>' + orderNo + '</td>' +
+          '<td>' + formattedDate + '</td>' +
+          '<td>' + (itemNames[m] || "") + '</td>' +
+          '<td>' + (colors[m] || "") + '</td>' +
+          '<td>' + (widths[m] || "") + '</td>' +
+          '<td>' + (units[m] || "") + '</td>' +
+          '<td style="text-align:center;">' + (qtys[m] || "") + '</td>' +
+          '<td style="text-align:right;">' + (rates[m] || "") + '</td>' +
+          '</tr>';
+      }
+
+      rowsHTML +=
+        '<tr style="font-weight:bold; background:#f9f9f9;">' +
+        '<td colspan="7" style="text-align:right;">Total Quantity</td>' +
+        '<td style="text-align:center;">' + totalQty + '</td>' +
+        '<td></td>' +
+        '</tr>';
+
+      var tableHTML =
+        '<table border="1" cellpadding="5" cellspacing="0" style="border-collapse:collapse; font-family:Arial,sans-serif; font-size:13px; width:100%;">' +
+        '<tr style="background-color:#f2f2f2; text-align:center;">' +
+        '<th>Sr.No</th><th>Order No</th><th>Order Date</th><th>Item Name</th><th>Color</th><th>Width</th><th>Unit</th><th>Qty</th><th>Rate</th>' +
+        '</tr>' + rowsHTML + '</table>';
+
+      var subject = "Order Confirmation – Order No. " + orderNo;
+      var body =
+        '<p>Dear <b>' + customerName + '</b>,</p>' +
+        '<p>Thank you for your order. Please find the summary below:</p>' +
+        tableHTML +
+        '<br>' +
+        '<p><b>Billing Address:</b> ' + address + '</p>' +
+        '<p>Kindly review and confirm if everything is correct.</p>' +
+        '<br>' +
+        '<p>Regards,<br>Sakshi<br>Ginza Industries Limited</p>';
+
+      var ccEmails = [];
+      if (salesPersonEmail) ccEmails.push(salesPersonEmail);
+      ccEmails.push("vishal.ambhore@ginzalimited.com");
+
+      try {
+        GmailApp.sendEmail(email, subject, "", {
+          htmlBody: body,
+          cc: ccEmails.join(","),
+          from: "crm.mumbai@ginzalimited.com"
+        });
+        if (targetRow > 1) {
+          paSheet.getRange(targetRow, 27).setValue("Sent");
+          paSheet.getRange(targetRow, 28).setValue("Sent Successfully");
+          SpreadsheetApp.flush();
+        }
+        return jsonReplyExtra_(true, "Confirmation Mail sent to " + email + " (Col AB = Sent Successfully)", { mailStatus: "Sent Successfully" });
+      } catch (mailErr) {
+        var errText = "Error Sending Mail: " + mailErr.message;
+        if (targetRow > 1) {
+          paSheet.getRange(targetRow, 28).setValue(errText);
+          SpreadsheetApp.flush();
+        }
+        return jsonReplyExtra_(false, errText, { mailStatus: errText });
+      }
+    }
+
+    if (action === "createDeliveryDraft") {
+      var paSheet = ss.getSheetByName(PA_SHEET_NAME);
+      if (!paSheet) return jsonReplyExtra_(false, "Sheet not found: " + PA_SHEET_NAME, { draftStatus: "❌ Error: Sheet not found" });
+
+      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo, payload.orderDate);
+
+      var TRIGGER_COLUMN = 42; // AP
+      var STATUS_COLUMN = 43;  // AQ
+      // Col AS deliberately ignored (not present in sheet)
+
+      if (targetRow > 1) {
+        var existingStatus = String(paSheet.getRange(targetRow, STATUS_COLUMN).getValue() || "").trim();
+        if (existingStatus === "✅ Draft Created in Gmail") {
+          paSheet.getRange(targetRow, TRIGGER_COLUMN).setValue(payload.colAP || "Sent");
+          SpreadsheetApp.flush();
+          return jsonReplyExtra_(true, "Draft already created in Gmail", {
+            draftStatus: "✅ Draft Created in Gmail",
+            draftUrl: "https://mail.google.com/mail/#drafts"
+          });
+        }
+      }
+
+      var today = new Date();
+      var formattedDate = Utilities.formatDate(today, Session.getScriptTimeZone(), "dd-MM-yyyy");
+
+      var customerName = targetRow > 1 ? (paSheet.getRange(targetRow, 2).getValue() || payload.customerName || "") : (payload.customerName || "");
+      var unit = targetRow > 1 ? (paSheet.getRange(targetRow, 4).getValue() || payload.unit || "") : (payload.unit || "");
+      var salesPerson = String(targetRow > 1 ? (paSheet.getRange(targetRow, 17).getValue() || payload.salesPerson || "") : (payload.salesPerson || "")).trim();
+      var OrderNo = targetRow > 1 ? (paSheet.getRange(targetRow, 19).getValue() || payload.orderNo || "") : (payload.orderNo || "");
+      var customerEmail = String(targetRow > 1 ? (paSheet.getRange(targetRow, 20).getValue() || payload.email || "") : (payload.email || "")).trim();
+      var transporter = targetRow > 1 ? (paSheet.getRange(targetRow, 37).getValue() || payload.transporterName || "") : (payload.transporterName || "");
+      var lrNumber = targetRow > 1 ? (paSheet.getRange(targetRow, 38).getValue() || payload.lrNumber || "") : (payload.lrNumber || "");
+
+      if (targetRow > 1) {
+        paSheet.getRange(targetRow, TRIGGER_COLUMN).setValue(payload.colAP || "Sent");
+      }
+
+      if (!customerEmail) {
+        if (targetRow > 1) {
+          paSheet.getRange(targetRow, STATUS_COLUMN).setValue("❌ Error: No Email");
+          SpreadsheetApp.flush();
+        }
+        return jsonReplyExtra_(false, "Error: No Email in Col T", { draftStatus: "❌ Error: No Email" });
+      }
+
+      var itemNames = [], colors = [], itemUnits = [], qtys = [], dispatchQnt = [];
+      if (targetRow > 1) {
+        var rawIt = String(paSheet.getRange(targetRow, 5).getValue() || "");
+        if (rawIt.trim() !== "") {
+          itemNames = rawIt.split(/\\r?\\n/);
+          colors = String(paSheet.getRange(targetRow, 6).getValue() || "").split(/\\r?\\n/);
+          itemUnits = String(paSheet.getRange(targetRow, 8).getValue() || "").split(/\\r?\\n/);
+          qtys = String(paSheet.getRange(targetRow, 9).getValue() || "").split(/\\r?\\n/);
+          dispatchQnt = String(paSheet.getRange(targetRow, 21).getValue() || "").split(/\\r?\\n/);
+        }
+      }
+      if (itemNames.length === 0 && payload.items && payload.items.length > 0) {
+        for (var dIdx = 0; dIdx < payload.items.length; dIdx++) {
+          var dit = payload.items[dIdx];
+          itemNames.push(dit.itemName || "");
+          colors.push(dit.color || "");
+          itemUnits.push(dit.unitOfItem || "");
+          qtys.push(String(dit.qty || 0));
+          dispatchQnt.push(String(dit.dispatchQty !== undefined ? dit.dispatchQty : ""));
+          if (!unit && dit.unit) unit = dit.unit;
+        }
+      }
+
+      var salesPersonEmails = {
+        "Amit Korgaonkar": "amit.korgaonkar@ginzalimited.com",
+        "Santosh Pachratkar": "santosh.pachratkar@ginzalimited.com",
+        "Rakesh Jain": "rakesh.jain@ginzalimited.com",
+        "Kamlesh Sutar": "kamlesh.sutar@ginzalimited.com",
+        "Pradeep Jadhav": "pradeep.jadhav@ginzalimited.com"
+      };
+
+      var ccList = [];
+      if (salesPersonEmails[salesPerson]) ccList.push(salesPersonEmails[salesPerson]);
+      ccList.push("vishal.ambhore@ginzalimited.com");
+      var cc = ccList.join(",");
+
+      var tableRows = "";
+      for (var i = 0; i < itemNames.length; i++) {
+        if (!itemNames[i]) continue;
+        var bgColor = i % 2 === 0 ? "#ffffff" : "#f9fafb";
+        tableRows +=
+          '<tr style="background:' + bgColor + ';">' +
+          '<td style="padding:10px;border:1px solid #e5e7eb;">' + itemNames[i] + '</td>' +
+          '<td style="padding:10px;border:1px solid #e5e7eb;">' + (colors[i] || "") + '</td>' +
+          '<td style="padding:10px;border:1px solid #e5e7eb;text-align:center;">' + (qtys[i] || "") + ' ' + (itemUnits[i] || "") + '</td>' +
+          '<td style="padding:10px;border:1px solid #e5e7eb;text-align:right;">' + (dispatchQnt[i] || "") + '</td>' +
+          '</tr>';
+      }
+
+      var htmlBody =
+        '<div style="font-family:Arial,sans-serif;color:#1f2937;max-width:800px;">' +
+        '<p>Dear <strong>' + customerName + '</strong>,</p>' +
+        '<p>We are pleased to inform you that your order has been successfully dispatched.</p>' +
+        '<div style="background:#f3f4f6;padding:15px;border-radius:8px;margin:20px 0;">' +
+        '<table width="100%" style="font-size:13px;">' +
+        '<tr><td>Order No:</td><td><strong>' + OrderNo + '</strong></td><td>Dispatch Date:</td><td><strong>' + formattedDate + '</strong></td></tr>' +
+        '<tr><td>Transporter:</td><td><strong>' + transporter + '</strong></td><td>LR Number:</td><td><strong>' + lrNumber + '</strong></td></tr>' +
+        '</table></div>' +
+        '<table width="100%" style="border-collapse:collapse;font-size:13px;">' +
+        '<thead><tr style="background:#1f2937;color:#fff;">' +
+        '<th style="padding:10px;">Item</th><th style="padding:10px;">Color</th><th style="padding:10px;">Qty</th><th style="padding:10px;">Dispatch Qnt</th>' +
+        '</tr></thead><tbody>' + tableRows + '</tbody></table>' +
+        '<p>Thank you for choosing <strong>Soie &amp; Ginza Industries Limited</strong>.</p>' +
+        '<div style="margin-top:20px;border-top:2px solid #3b82f6;padding-top:10px;">' +
+        '<strong>' + salesPerson + '</strong><br>' +
+        '<span style="font-size:12px;color:#6b7280;">Sales Team | Unit: ' + unit + '</span>' +
+        '</div></div>';
+
+      try {
+        GmailApp.createDraft(
+          customerEmail,
+          "Order Dispatched – " + OrderNo,
+          "Please view this email in HTML format.",
+          { htmlBody: htmlBody, cc: cc }
+        );
+        if (targetRow > 1) {
+          paSheet.getRange(targetRow, TRIGGER_COLUMN).setValue("Sent");
+          paSheet.getRange(targetRow, STATUS_COLUMN).setValue("✅ Draft Created in Gmail");
+          SpreadsheetApp.flush();
+        }
+        return jsonReplyExtra_(true, "Gmail Draft created for " + customerName, {
+          draftStatus: "✅ Draft Created in Gmail",
+          draftUrl: "https://mail.google.com/mail/#drafts"
+        });
+      } catch (draftErr) {
+        var dErr = "❌ Error: " + draftErr.message;
+        if (targetRow > 1) {
+          paSheet.getRange(targetRow, STATUS_COLUMN).setValue(dErr);
+          SpreadsheetApp.flush();
+        }
+        return jsonReplyExtra_(false, dErr, { draftStatus: dErr });
+      }
+    }
+
+    if (action === "updateCustomerEmail") {
+      var paSheet = ss.getSheetByName(PA_SHEET_NAME);
+      if (!paSheet) return jsonReply_(false, "Sheet not found: " + PA_SHEET_NAME);
+
+      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo, payload.orderDate);
+      if (targetRow <= 1) {
+        return jsonReply_(false, "Matching row not found in " + PA_SHEET_NAME);
+      }
+
+      // Col T (20) = Customer Mail Id
+      paSheet.getRange(targetRow, 20).setValue(String(payload.email || "").trim());
+      SpreadsheetApp.flush();
+      return jsonReply_(true, "Customer Mail Id saved to Col T in Row #" + targetRow);
+    }
+
     return jsonReply_(false, "Unknown action: " + action);
   } catch (err) {
     return jsonReply_(false, err.toString());
@@ -2992,7 +3278,7 @@ function findMatchingRow_(sheet, sheetRowIndex, timestamp, customerName, itemNam
   var lastRow = sheet.getLastRow();
   if (lastRow < 2) return -1;
 
-  var norm = function(v) { return String(v || "").replace(/\s+/g, " ").trim().toLowerCase(); };
+  var norm = function(v) { return String(v || "").replace(/\\s+/g, " ").trim().toLowerCase(); };
   var wantCust = norm(customerName);
   var wantTs = norm(timestamp);
   var wantItem = norm(itemName);
@@ -3054,6 +3340,16 @@ function findMatchingRow_(sheet, sheetRowIndex, timestamp, customerName, itemNam
 function jsonReply_(ok, message) {
   return ContentService
     .createTextOutput(JSON.stringify({ ok: ok, status: ok ? "success" : "error", message: message }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function jsonReplyExtra_(ok, message, extra) {
+  var body = { ok: ok, status: ok ? "success" : "error", message: message };
+  if (extra) {
+    for (var k in extra) body[k] = extra[k];
+  }
+  return ContentService
+    .createTextOutput(JSON.stringify(body))
     .setMimeType(ContentService.MimeType.JSON);
 }`;
 }

@@ -97,6 +97,11 @@ const LOCAL_STORAGE_COL_AH_KEY = 'ginza_fms_col_ah_v11';
 const LOCAL_STORAGE_COL_AI_KEY = 'ginza_fms_col_ai_v11';
 const LOCAL_STORAGE_COL_AJ_KEY = 'ginza_fms_col_aj_v11';
 const LOCAL_STORAGE_COL_AL_KEY = 'ginza_fms_col_al_v11';
+const LOCAL_STORAGE_COL_AA_KEY = 'ginza_fms_col_aa_mail_v1';
+const LOCAL_STORAGE_COL_AB_KEY = 'ginza_fms_col_ab_mail_status_v1';
+const LOCAL_STORAGE_COL_AP_KEY = 'ginza_fms_col_ap_delivery_mail_v1';
+const LOCAL_STORAGE_COL_AQ_KEY = 'ginza_fms_col_aq_delivery_status_v1';
+const LOCAL_STORAGE_COL_T_KEY = 'ginza_fms_col_t_emails_v1';
 
 // Helper: Check if an item/order is Completed (Closed) in Col AM
 export const isItemComplete = (status?: string): boolean => {
@@ -176,6 +181,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   const hydrateFromAutomationRows = (rows: ProductOrderRow[], resetStale = false) => {
     const nextW: Record<string, string> = {};
     const nextX: Record<string, string> = {};
+    const nextAA: Record<string, string> = {};
+    const nextAB: Record<string, string> = {};
     const nextAC: Record<string, string> = {};
     const nextAE: Record<string, boolean> = {};
     const nextAF: Record<string, string> = {};
@@ -185,12 +192,17 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     const nextAJ: Record<string, string> = {};
     const nextAL: Record<string, string> = {};
     const nextAN: Record<string, string> = {};
+    const nextAP: Record<string, string> = {};
+    const nextAQ: Record<string, string> = {};
+    const nextT: Record<string, string> = {};
     const nextDispatch: Record<string, number> = {};
 
     rows.forEach(row => {
       const gk = buildOrderGroupKey(row);
       if (row.accountStatus) nextW[gk] = row.accountStatus;
       if (row.operationalRemark) nextX[gk] = row.operationalRemark;
+      if (row.confirmationMail) nextAA[gk] = row.confirmationMail;
+      if (row.mailStatus) nextAB[gk] = row.mailStatus;
       if (row.confirmationMsg) nextAC[gk] = row.confirmationMsg;
       if (row.followUp1 !== undefined) nextAE[gk] = Boolean(row.followUp1);
       if (row.followUp1Timestamp) nextAF[gk] = row.followUp1Timestamp;
@@ -200,6 +212,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       if (row.followUp2Remark) nextAJ[gk] = row.followUp2Remark;
       if (row.lrNumber) nextAL[gk] = row.lrNumber;
       if (row.deliveredWhatsappMsg) nextAN[gk] = row.deliveredWhatsappMsg;
+      if (row.deliveryEmail) nextAP[gk] = row.deliveryEmail;
+      if (row.deliveryEmailStatus) nextAQ[gk] = row.deliveryEmailStatus;
+      if (row.customerMailId || row.customerEmail) nextT[gk] = (row.customerMailId || row.customerEmail || '').trim();
 
       const itemKey = `${gk}___${(row.itemName || '').trim()}___${(row.color || '').trim()}___${(row.width || '').trim()}`;
       if (row.dispatchQty !== undefined && row.dispatchQty > 0) {
@@ -210,6 +225,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     if (resetStale) {
       if (Object.keys(nextW).length > 0) setColWStatuses(prev => ({ ...prev, ...nextW }));
       if (Object.keys(nextX).length > 0) setColXRemarks(prev => ({ ...prev, ...nextX }));
+      if (Object.keys(nextAA).length > 0) setColMailAAStatuses(prev => ({ ...prev, ...nextAA }));
+      if (Object.keys(nextAB).length > 0) setColMailABStatuses(prev => ({ ...prev, ...nextAB }));
       if (Object.keys(nextAC).length > 0) setAcStatuses(prev => ({ ...prev, ...nextAC }));
       if (Object.keys(nextAE).length > 0) setColAEChecks(prev => ({ ...prev, ...nextAE }));
       if (Object.keys(nextAF).length > 0) setColAFTimestamps(prev => ({ ...prev, ...nextAF }));
@@ -219,6 +236,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       if (Object.keys(nextAJ).length > 0) setColAJRemarks(prev => ({ ...prev, ...nextAJ }));
       if (Object.keys(nextAL).length > 0) setLrNumbers(prev => ({ ...prev, ...nextAL }));
       if (Object.keys(nextAN).length > 0) setAnStatuses(prev => ({ ...prev, ...nextAN }));
+      if (Object.keys(nextAP).length > 0) setColAPStatuses(prev => ({ ...prev, ...nextAP }));
+      if (Object.keys(nextAQ).length > 0) setColAQStatuses(prev => ({ ...prev, ...nextAQ }));
+      if (Object.keys(nextT).length > 0) setColTEmails(prev => ({ ...prev, ...nextT }));
       setDispatchRecords(prev => ({ ...prev, ...nextDispatch }));
     }
   };
@@ -550,7 +570,6 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     } catch (e) {}
     return {};
   });
-  const colAAStatuses = colWStatuses;
 
   // Col X: Remark (Manual User Text Edit with Auto-Save)
   const [colXRemarks, setColXRemarks] = useState<Record<string, string>>(() => {
@@ -560,7 +579,53 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     } catch (e) {}
     return {};
   });
-  const colABRemarks = colXRemarks;
+
+  // Col AA: Confirmation Mail ("Pending" | "Sent")
+  const [colMailAAStatuses, setColMailAAStatuses] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AA_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+
+  // Col AB: Mail Status ("Pending" | "Sending..." | "Sent Successfully" | "Delivered" | "No Mail ID Found" | "Error...")
+  const [colMailABStatuses, setColMailABStatuses] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AB_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const [sendingMailOrderKey, setSendingMailOrderKey] = useState<string | null>(null);
+
+  // Col AP: Delivery Email ("Pending" | "Sent" [displayed as Mail Sent])
+  const [colAPStatuses, setColAPStatuses] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AP_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+
+  // Col AQ: Delivery Email Link / Draft Status ("Pending" | "Creating Draft..." | "✅ Draft Created in Gmail" | "❌ Error...")
+  const [colAQStatuses, setColAQStatuses] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AQ_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const [creatingDraftOrderKey, setCreatingDraftOrderKey] = useState<string | null>(null);
+
+  // Col T: Editable Customer Mail Id
+  const [colTEmails, setColTEmails] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_T_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
 
   // Col AE: Follow-up 1 Checkbox (true/false)
   const [colAEChecks, setColAEChecks] = useState<Record<string, boolean>>(() => {
@@ -780,6 +845,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         localStorage.setItem(LOCAL_STORAGE_DISPATCH_WA_KEY, JSON.stringify(anStatuses));
         localStorage.setItem(LOCAL_STORAGE_COL_W_KEY, JSON.stringify(colWStatuses));
         localStorage.setItem(LOCAL_STORAGE_COL_X_KEY, JSON.stringify(colXRemarks));
+        localStorage.setItem(LOCAL_STORAGE_COL_AA_KEY, JSON.stringify(colMailAAStatuses));
+        localStorage.setItem(LOCAL_STORAGE_COL_AB_KEY, JSON.stringify(colMailABStatuses));
         localStorage.setItem(LOCAL_STORAGE_COL_AE_KEY, JSON.stringify(colAEChecks));
         localStorage.setItem(LOCAL_STORAGE_COL_AF_KEY, JSON.stringify(colAFTimestamps));
         localStorage.setItem(LOCAL_STORAGE_COL_AG_KEY, JSON.stringify(colAGRemarks));
@@ -787,6 +854,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         localStorage.setItem(LOCAL_STORAGE_COL_AI_KEY, JSON.stringify(colAITimestamps));
         localStorage.setItem(LOCAL_STORAGE_COL_AJ_KEY, JSON.stringify(colAJRemarks));
         localStorage.setItem(LOCAL_STORAGE_COL_AL_KEY, JSON.stringify(lrNumbers));
+        localStorage.setItem(LOCAL_STORAGE_COL_AP_KEY, JSON.stringify(colAPStatuses));
+        localStorage.setItem(LOCAL_STORAGE_COL_AQ_KEY, JSON.stringify(colAQStatuses));
+        localStorage.setItem(LOCAL_STORAGE_COL_T_KEY, JSON.stringify(colTEmails));
       } catch (e) {}
     }, 600);
     return () => clearTimeout(timer);
@@ -795,6 +865,11 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     anStatuses,
     colWStatuses,
     colXRemarks,
+    colMailAAStatuses,
+    colMailABStatuses,
+    colAPStatuses,
+    colAQStatuses,
+    colTEmails,
     colAEChecks,
     colAFTimestamps,
     colAGRemarks,
@@ -841,6 +916,11 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           branchHeadEmail: row.branchHeadEmail || 'vinay.chhajer@ginzalimited.com',
           orderNo: row.orderNo || '',
           orderNoTimestamp: row.orderNoTimestamp || '',
+          confirmationMail: row.confirmationMail || '',
+          mailStatus: row.mailStatus || '',
+          deliveryEmail: row.deliveryEmail || '',
+          deliveryEmailStatus: row.deliveryEmailStatus || '',
+          sheetRowIndex: row.sheetRowIndex,
           statusAN: (isItemComplete(row.statusAN) ? 'Complete' : row.statusAN) as any || 'Open',
           _maxRow: rowWeight
         };
@@ -848,6 +928,21 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         if (!map[orderKey].orderNo && row.orderNo) {
           map[orderKey].orderNo = row.orderNo;
           map[orderKey].orderNoTimestamp = row.orderNoTimestamp;
+        }
+        if (!map[orderKey].confirmationMail && row.confirmationMail) {
+          map[orderKey].confirmationMail = row.confirmationMail;
+        }
+        if (!map[orderKey].mailStatus && row.mailStatus) {
+          map[orderKey].mailStatus = row.mailStatus;
+        }
+        if (!map[orderKey].deliveryEmail && row.deliveryEmail) {
+          map[orderKey].deliveryEmail = row.deliveryEmail;
+        }
+        if (!map[orderKey].deliveryEmailStatus && row.deliveryEmailStatus) {
+          map[orderKey].deliveryEmailStatus = row.deliveryEmailStatus;
+        }
+        if (!map[orderKey].sheetRowIndex && row.sheetRowIndex) {
+          map[orderKey].sheetRowIndex = row.sheetRowIndex;
         }
         if (isItemComplete(row.statusAN)) {
           map[orderKey].statusAN = 'Complete';
@@ -1462,7 +1557,6 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       return next;
     });
   };
-  const handleUpdateColAA = handleUpdateColW;
 
   const handleUpdateColX = (orderKey: string, val: string) => {
     setColXRemarks(prev => {
@@ -1471,7 +1565,388 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       return next;
     });
   };
-  const handleUpdateColAB = handleUpdateColX;
+
+  // Col T: Editable Customer Mail Id (Instant local update + Google Sheet sync on blur/Enter)
+  const handleUpdateColT = (orderKey: string, val: string) => {
+    setColTEmails(prev => {
+      const next = { ...prev, [orderKey]: val };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_T_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  const handleCommitColT = async (order: GroupedOrder, rawVal: string) => {
+    const gk = order.orderKey;
+    const cleanEmail = rawVal.trim();
+    const originalEmail = (order.customerMailId || order.customerEmail || '').trim();
+
+    setColTEmails(prev => {
+      const next = { ...prev, [gk]: cleanEmail };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_T_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+
+    setAutomationRows(prev =>
+      prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, customerMailId: cleanEmail, customerEmail: cleanEmail } : r))
+    );
+    setRawResponses(prev =>
+      prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, customerMailId: cleanEmail, customerEmail: cleanEmail } : r))
+    );
+
+    if (cleanEmail === originalEmail) return;
+
+    if (webAppUrl && webAppUrl.trim().startsWith('https://script.google.com/')) {
+      const matchedAutoRow = automationRows.find(r => buildOrderGroupKey(r) === gk);
+      const sheetRowIndex = order.sheetRowIndex || matchedAutoRow?.sheetRowIndex;
+      const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
+        action: 'updateCustomerEmail',
+        sheetRowIndex,
+        timestamp: order.timestamp,
+        orderDate: order.orderDate,
+        customerName: order.customerName,
+        itemName: order.items[0]?.itemName,
+        orderNo: order.orderNo,
+        email: cleanEmail
+      });
+
+      if (writeRes.ok) {
+        setSyncFeedbackTone('success');
+        setSyncFeedback(`✓ Customer Mail Id updated to "${cleanEmail || '—'}" in Col T & Google Sheet.`);
+      } else if ((writeRes.message || '').includes('Unknown action')) {
+        setSyncFeedbackTone('success');
+        setSyncFeedback(`✓ Customer Mail Id "${cleanEmail || '—'}" saved in App. (Sheet Col T sync ke liye 2-Way Apps Script update karein)`);
+      } else {
+        setSyncFeedbackTone('warning');
+        setSyncFeedback(`Saved in App. Google Sheet sync note: ${writeRes.message}`);
+      }
+      setTimeout(() => setSyncFeedback(null), 4000);
+    } else {
+      setSyncFeedbackTone('success');
+      setSyncFeedback(`✓ Customer Mail Id "${cleanEmail || '—'}" updated for ${order.customerName}.`);
+      setTimeout(() => setSyncFeedback(null), 3000);
+    }
+  };
+
+  // Col AA: Confirmation Mail ("Pending" | "Sent") -> Triggers GmailApp Confirmation Email & updates Col AB
+  const handleConfirmationMailChange = async (order: GroupedOrder, newVal: 'Pending' | 'Sent') => {
+    const gk = order.orderKey;
+
+    if (newVal === 'Pending') {
+      setColMailAAStatuses(prev => {
+        const next = { ...prev, [gk]: 'Pending' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AA_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setColMailABStatuses(prev => {
+        const next = { ...prev, [gk]: 'Pending' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AB_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setAutomationRows(prev =>
+        prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, confirmationMail: 'Pending', mailStatus: 'Pending' } : r))
+      );
+      setSyncFeedbackTone('warning');
+      setSyncFeedback(`Col AA reset to "Pending" for ${order.customerName}.`);
+      setTimeout(() => setSyncFeedback(null), 3000);
+      return;
+    }
+
+    const email = (colTEmails[gk] ?? order.customerMailId ?? order.customerEmail ?? '').trim();
+    const matchedAutoRow = automationRows.find(r => buildOrderGroupKey(r) === gk);
+    const sheetRowIndex = order.sheetRowIndex || matchedAutoRow?.sheetRowIndex;
+
+    if (!email) {
+      setColMailAAStatuses(prev => {
+        const next = { ...prev, [gk]: 'Sent' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AA_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setColMailABStatuses(prev => {
+        const next = { ...prev, [gk]: 'No Mail ID Found' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AB_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setSyncFeedbackTone('warning');
+      setSyncFeedback(`⚠️ No Mail ID Found (Col T blank) for ${order.customerName}. Col AB set to "No Mail ID Found".`);
+      setTimeout(() => setSyncFeedback(null), 5000);
+
+      if (webAppUrl && webAppUrl.trim().startsWith('https://script.google.com/')) {
+        pushOrderUpdateToGoogleSheet(webAppUrl, {
+          action: 'sendConfirmationMail',
+          sheetRowIndex,
+          timestamp: order.timestamp,
+          orderDate: order.orderDate,
+          customerName: order.customerName,
+          itemName: order.items[0]?.itemName,
+          orderNo: order.orderNo,
+          email: '',
+          colAA: 'Sent'
+        });
+      }
+      return;
+    }
+
+    // Check Web App URL before attempting email send
+    if (!webAppUrl || !webAppUrl.trim().startsWith('https://script.google.com/')) {
+      setSyncFeedbackTone('warning');
+      setSyncFeedback('⚠️ 2-Way Web App URL set nahi hai. Mail bhejne ke liye "2-Way Sheet Write" me URL save karein.');
+      setShowTwoWaySyncModal(true);
+      setTimeout(() => setSyncFeedback(null), 5000);
+      return;
+    }
+
+    setSendingMailOrderKey(gk);
+    setColMailAAStatuses(prev => {
+      const next = { ...prev, [gk]: 'Sent' };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AA_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+    setColMailABStatuses(prev => {
+      const next = { ...prev, [gk]: 'Sending...' };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AB_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+    setSyncFeedbackTone('success');
+    setSyncFeedback(`📧 Sending Order Confirmation Mail to ${email} (${order.customerName})...`);
+
+    const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
+      action: 'sendConfirmationMail',
+      sheetRowIndex,
+      timestamp: order.timestamp,
+      orderDate: order.orderDate,
+      customerName: order.customerName,
+      itemName: order.items[0]?.itemName,
+      orderNo: order.orderNo,
+      email,
+      billingAddress: order.billingAddress,
+      salesPerson: order.salesPerson,
+      colAA: 'Sent',
+      items: order.items.map(it => ({
+        unit: it.unit,
+        itemName: it.itemName,
+        color: it.color,
+        width: it.width,
+        unitOfItem: it.unitOfItem,
+        qty: it.qty,
+        rate: it.rate
+      }))
+    });
+
+    setSendingMailOrderKey(null);
+
+    if (writeRes.ok) {
+      const finalStatus = writeRes.mailStatus || 'Sent Successfully';
+      setColMailAAStatuses(prev => {
+        const next = { ...prev, [gk]: 'Sent' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AA_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setColMailABStatuses(prev => {
+        const next = { ...prev, [gk]: finalStatus };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AB_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setAutomationRows(prev =>
+        prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, confirmationMail: 'Sent', mailStatus: finalStatus } : r))
+      );
+      setSyncFeedbackTone('success');
+      setSyncFeedback(`✓ Confirmation Mail sent to ${email}! Col AB Status: "${finalStatus}"`);
+      setTimeout(() => setSyncFeedback(null), 5000);
+    } else if ((writeRes.message || '').includes('Unknown action')) {
+      setColMailAAStatuses(prev => {
+        const next = { ...prev, [gk]: 'Pending' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AA_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setColMailABStatuses(prev => {
+        const next = { ...prev, [gk]: 'Update GAS Script' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AB_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setSyncFeedbackTone('warning');
+      setSyncFeedback('⚠️ Apps Script me naya Mail Confirmation code update karke New Deployment karein ("2-Way Sheet Write" se code copy karein).');
+      setShowTwoWaySyncModal(true);
+      setTimeout(() => setSyncFeedback(null), 8000);
+    } else {
+      const errStatus = writeRes.mailStatus || `Error Sending Mail: ${writeRes.message}`;
+      setColMailABStatuses(prev => {
+        const next = { ...prev, [gk]: errStatus };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AB_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setSyncFeedbackTone('error');
+      setSyncFeedback(`❌ ${errStatus}`);
+      setTimeout(() => setSyncFeedback(null), 6500);
+    }
+  };
+
+  // Col AP: Delivery Email ("Pending" | "Sent" [Mail Sent]) -> Creates Gmail Draft & shows clickable link in Col AQ
+  const handleDeliveryEmailChange = async (order: GroupedOrder, newVal: 'Pending' | 'Sent') => {
+    const gk = order.orderKey;
+
+    if (newVal === 'Pending') {
+      setColAPStatuses(prev => {
+        const next = { ...prev, [gk]: 'Pending' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AP_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setColAQStatuses(prev => {
+        const next = { ...prev, [gk]: 'Pending' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AQ_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setAutomationRows(prev =>
+        prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, deliveryEmail: 'Pending', deliveryEmailStatus: 'Pending' } : r))
+      );
+      setSyncFeedbackTone('warning');
+      setSyncFeedback(`Col AP Delivery Email reset to "Pending" for ${order.customerName}.`);
+      setTimeout(() => setSyncFeedback(null), 3000);
+      return;
+    }
+
+    const existingAq = (colAQStatuses[gk] ?? order.deliveryEmailStatus ?? '').trim();
+    if (existingAq === '✅ Draft Created in Gmail') {
+      setColAPStatuses(prev => {
+        const next = { ...prev, [gk]: 'Sent' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AP_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setSyncFeedbackTone('success');
+      setSyncFeedback(`✅ Gmail Draft already exists for ${order.customerName}. Col AQ link par click karke open karein!`);
+      setTimeout(() => setSyncFeedback(null), 4000);
+      return;
+    }
+
+    const email = (colTEmails[gk] ?? order.customerMailId ?? order.customerEmail ?? '').trim();
+    const matchedAutoRow = automationRows.find(r => buildOrderGroupKey(r) === gk);
+    const sheetRowIndex = order.sheetRowIndex || matchedAutoRow?.sheetRowIndex;
+
+    if (!email) {
+      setColAPStatuses(prev => {
+        const next = { ...prev, [gk]: 'Sent' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AP_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setColAQStatuses(prev => {
+        const next = { ...prev, [gk]: '❌ Error: No Email' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AQ_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setSyncFeedbackTone('warning');
+      setSyncFeedback(`❌ Error: No Email found in Col T for ${order.customerName}.`);
+      setTimeout(() => setSyncFeedback(null), 5000);
+
+      if (webAppUrl && webAppUrl.trim().startsWith('https://script.google.com/')) {
+        pushOrderUpdateToGoogleSheet(webAppUrl, {
+          action: 'createDeliveryDraft',
+          sheetRowIndex,
+          timestamp: order.timestamp,
+          orderDate: order.orderDate,
+          customerName: order.customerName,
+          itemName: order.items[0]?.itemName,
+          orderNo: order.orderNo,
+          email: '',
+          colAP: 'Sent'
+        });
+      }
+      return;
+    }
+
+    if (!webAppUrl || !webAppUrl.trim().startsWith('https://script.google.com/')) {
+      setSyncFeedbackTone('warning');
+      setSyncFeedback('⚠️ 2-Way Web App URL set nahi hai. Gmail Draft create karne ke liye "2-Way Sheet Write" me URL save karein.');
+      setShowTwoWaySyncModal(true);
+      setTimeout(() => setSyncFeedback(null), 5000);
+      return;
+    }
+
+    setCreatingDraftOrderKey(gk);
+    setColAPStatuses(prev => {
+      const next = { ...prev, [gk]: 'Sent' };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AP_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+    setColAQStatuses(prev => {
+      const next = { ...prev, [gk]: 'Creating Draft...' };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AQ_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+    setSyncFeedbackTone('success');
+    setSyncFeedback(`📝 Creating Delivery Email Draft in Gmail for ${order.customerName}...`);
+
+    const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
+      action: 'createDeliveryDraft',
+      sheetRowIndex,
+      timestamp: order.timestamp,
+      orderDate: order.orderDate,
+      customerName: order.customerName,
+      itemName: order.items[0]?.itemName,
+      orderNo: order.orderNo,
+      unit: order.items[0]?.unit || '',
+      email,
+      salesPerson: order.salesPerson,
+      transporterName: order.transporterName || '',
+      lrNumber: lrNumbers[gk] || order.lrNumber || '',
+      colAP: 'Sent',
+      items: order.items.map(it => ({
+        unit: it.unit,
+        itemName: it.itemName,
+        color: it.color,
+        width: it.width,
+        unitOfItem: it.unitOfItem,
+        qty: it.qty,
+        rate: it.rate,
+        dispatchQty: it.dispatchQty ?? 0
+      }))
+    });
+
+    setCreatingDraftOrderKey(null);
+
+    if (writeRes.ok) {
+      const finalDraftStatus = writeRes.draftStatus || '✅ Draft Created in Gmail';
+      setColAPStatuses(prev => {
+        const next = { ...prev, [gk]: 'Sent' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AP_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setColAQStatuses(prev => {
+        const next = { ...prev, [gk]: finalDraftStatus };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AQ_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setAutomationRows(prev =>
+        prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, deliveryEmail: 'Sent', deliveryEmailStatus: finalDraftStatus } : r))
+      );
+      setSyncFeedbackTone('success');
+      setSyncFeedback(`✅ Draft Created in Gmail for ${order.customerName}! Col AQ link par click karke Gmail Draft open karein.`);
+      setTimeout(() => setSyncFeedback(null), 6000);
+    } else if ((writeRes.message || '').includes('Unknown action')) {
+      setColAPStatuses(prev => {
+        const next = { ...prev, [gk]: 'Pending' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AP_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setColAQStatuses(prev => {
+        const next = { ...prev, [gk]: 'Update GAS Script' };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AQ_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setSyncFeedbackTone('warning');
+      setSyncFeedback('⚠️ Delivery Email Draft ke liye "2-Way Sheet Write" se updated Apps Script copy karke Google Sheet me New Deployment karein.');
+      setShowTwoWaySyncModal(true);
+      setTimeout(() => setSyncFeedback(null), 8000);
+    } else {
+      const errStatus = writeRes.draftStatus || `❌ Error: ${writeRes.message}`;
+      setColAQStatuses(prev => {
+        const next = { ...prev, [gk]: errStatus };
+        try { localStorage.setItem(LOCAL_STORAGE_COL_AQ_KEY, JSON.stringify(next)); } catch {}
+        return next;
+      });
+      setSyncFeedbackTone('error');
+      setSyncFeedback(errStatus);
+      setTimeout(() => setSyncFeedback(null), 6500);
+    }
+  };
 
   // Export entire sheet as CSV (Exact 45 Columns from user's specification)
   const handleExportCSV = () => {
@@ -1517,10 +1992,10 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           `"${order.orderNo || ''}"`,
           `${item.dispatchQty || 0}`,
           `${item.balanceQty || 0}`,
-          `"${colAAStatuses[order.orderKey] || 'In Production'}"`,
-          `"${(colABRemarks[order.orderKey] || '').replace(/"/g, '""')}"`,
-          `"Sent"`,
-          `"Delivered"`,
+          `"${colWStatuses[order.orderKey] || 'In Production'}"`,
+          `"${(colXRemarks[order.orderKey] || '').replace(/"/g, '""')}"`,
+          `"${colMailAAStatuses[order.orderKey] || order.confirmationMail || 'Pending'}"`,
+          `"${colMailABStatuses[order.orderKey] || order.mailStatus || 'Pending'}"`,
           `"${aeStatuses[order.orderKey] || 'Pending'}"`,
           `"${(aeStatuses[order.orderKey] || 'Pending') === 'Message Sent' ? 'Sent WA' : ''}"`,
           `"${colAGChecks[order.orderKey] ? 'Yes' : 'No'}"`,
@@ -1533,9 +2008,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           `"${order.statusAN || 'Open'}"`,
           `"${aoStatuses[order.orderKey] || 'Pending'}"`,
           `"${aoStatuses[order.orderKey] === 'Message Sent' ? 'Sent Messages' : ''}"`,
-          `"${order.customerEmail || ''}"`,
-          `""`,
-          `"Sent"`
+          `"${colAPStatuses[order.orderKey] || order.deliveryEmail || 'Pending'}"`,
+          `"${colAQStatuses[order.orderKey] || order.deliveryEmailStatus || 'Pending'}"`,
+          `"${colTEmails[order.orderKey] ?? order.customerMailId ?? order.customerEmail ?? ''}"`
         ]);
       });
     });
@@ -1765,6 +2240,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     const newItems: ProductOrderRow[] = [];
     const importedColW: Record<string, string> = {};
     const importedColX: Record<string, string> = {};
+    const importedColAA: Record<string, string> = {};
+    const importedColAB: Record<string, string> = {};
     const importedColAC: Record<string, string> = {};
     const importedColAE: Record<string, boolean> = {};
     const importedColAF: Record<string, string> = {};
@@ -1774,6 +2251,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     const importedColAJ: Record<string, string> = {};
     const importedColAL: Record<string, string> = {};
     const importedColAN: Record<string, string> = {};
+    const importedColAP: Record<string, string> = {};
+    const importedColAQ: Record<string, string> = {};
     const importedDispatch: Record<string, number> = {};
 
     let currentPO = 'IMPORT-PO';
@@ -1934,6 +2413,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
         if (cols[22]) importedColW[orderKey] = cols[22].trim();
         if (cols[23]) importedColX[orderKey] = cols[23].trim();
+        if (cols[26]) importedColAA[orderKey] = cols[26].trim();
+        if (cols[27]) importedColAB[orderKey] = cols[27].trim();
         if (cols[28]) importedColAC[orderKey] = cols[28].trim();
         if (cols[30]) {
           const val30 = cols[30].trim().toLowerCase();
@@ -1949,6 +2430,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         if (cols[35]) importedColAJ[orderKey] = cols[35].trim();
         if (cols[37]) importedColAL[orderKey] = cols[37].trim();
         if (cols[39]) importedColAN[orderKey] = cols[39].trim();
+        if (cols[41]) importedColAP[orderKey] = cols[41].trim();
+        if (cols[42]) importedColAQ[orderKey] = cols[42].trim();
 
         const itemKey = `${orderKey}___${itemName.trim()}___${color.trim()}___${width.trim()}`;
         if (rawDispatch !== '') {
@@ -2044,6 +2527,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     if (newItems.length > 0) {
       if (Object.keys(importedColW).length > 0) setColWStatuses(prev => ({ ...prev, ...importedColW }));
       if (Object.keys(importedColX).length > 0) setColXRemarks(prev => ({ ...prev, ...importedColX }));
+      if (Object.keys(importedColAA).length > 0) setColMailAAStatuses(prev => ({ ...prev, ...importedColAA }));
+      if (Object.keys(importedColAB).length > 0) setColMailABStatuses(prev => ({ ...prev, ...importedColAB }));
       if (Object.keys(importedColAC).length > 0) setAcStatuses(prev => ({ ...prev, ...importedColAC }));
       if (Object.keys(importedColAE).length > 0) setColAEChecks(prev => ({ ...prev, ...importedColAE }));
       if (Object.keys(importedColAF).length > 0) setColAFTimestamps(prev => ({ ...prev, ...importedColAF }));
@@ -2053,6 +2538,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       if (Object.keys(importedColAJ).length > 0) setColAJRemarks(prev => ({ ...prev, ...importedColAJ }));
       if (Object.keys(importedColAL).length > 0) setLrNumbers(prev => ({ ...prev, ...importedColAL }));
       if (Object.keys(importedColAN).length > 0) setAnStatuses(prev => ({ ...prev, ...importedColAN }));
+      if (Object.keys(importedColAP).length > 0) setColAPStatuses(prev => ({ ...prev, ...importedColAP }));
+      if (Object.keys(importedColAQ).length > 0) setColAQStatuses(prev => ({ ...prev, ...importedColAQ }));
       if (Object.keys(importedDispatch).length > 0) setDispatchRecords(prev => ({ ...prev, ...importedDispatch }));
 
       if (importReplaceMode) {
@@ -2256,10 +2743,12 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         if (colKey === 'Q' && !selectedVals.includes(order.salesPerson || '')) return;
         if (colKey === 'R' && !selectedVals.includes(order.salesPersonContact || '')) return;
         if (colKey === 'S' && !selectedVals.includes(order.orderNo || 'Set SO#')) return;
-        if (colKey === 'T' && !selectedVals.includes(order.customerMailId || order.customerEmail || '')) return;
+        if (colKey === 'T' && !selectedVals.includes((colTEmails[order.orderKey] ?? order.customerMailId ?? order.customerEmail ?? '').trim())) return;
         if (colKey === 'W' && !selectedVals.includes(colWStatuses[order.orderKey] ?? (order.accountStatus || 'In Production'))) return;
         if (colKey === 'X' && !selectedVals.includes(colXRemarks[order.orderKey] ?? '')) return;
         if (colKey === 'Y' && !selectedVals.includes(order.approvalStatus || 'APPROVED')) return;
+        if (colKey === 'AA' && !selectedVals.includes(colMailAAStatuses[order.orderKey] || order.confirmationMail || 'Pending')) return;
+        if (colKey === 'AB' && !selectedVals.includes(colMailABStatuses[order.orderKey] || order.mailStatus || 'Pending')) return;
         if (colKey === 'AC' && !selectedVals.includes(acStatuses[order.orderKey] || 'Pending')) return;
         if (colKey === 'AE' && !selectedVals.includes(colAEChecks[order.orderKey] ? 'Checked' : 'Unchecked')) return;
         if (colKey === 'AF' && !selectedVals.includes(colAFTimestamps[order.orderKey] || '—')) return;
@@ -2270,7 +2759,15 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         if (colKey === 'AK' && !selectedVals.includes(order.transporterName || 'Atc express')) return;
         if (colKey === 'AL' && !selectedVals.includes(lrNumbers[order.orderKey] || '')) return;
         if (colKey === 'AN' && !selectedVals.includes(anStatuses[order.orderKey] || 'Pending')) return;
-        if (colKey === 'AP' && !selectedVals.includes(order.customerMailId || order.customerEmail || '')) return;
+        if (colKey === 'AP') {
+          const rawAP = (colAPStatuses[order.orderKey] ?? order.deliveryEmail ?? '').trim();
+          const apLabel = rawAP.toLowerCase() === 'sent' ? 'Mail Sent' : 'Pending';
+          if (!selectedVals.includes(apLabel)) return;
+        }
+        if (colKey === 'AQ') {
+          const aqVal = (colAQStatuses[order.orderKey] ?? order.deliveryEmailStatus ?? '').trim() || 'Pending';
+          if (!selectedVals.includes(aqVal)) return;
+        }
       }
 
       // Search filter (Customer Name / Order Number basis)
@@ -2331,7 +2828,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
 
     return result;
-  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, searchMode, colFilters, sortConfig, acStatuses, anStatuses, colWStatuses, colXRemarks, colAEChecks, colAFTimestamps, colAGRemarks, colAHChecks, colAITimestamps, colAJRemarks, lrNumbers]);
+  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, searchMode, colFilters, sortConfig, acStatuses, anStatuses, colWStatuses, colXRemarks, colTEmails, colMailAAStatuses, colMailABStatuses, colAPStatuses, colAQStatuses, colAEChecks, colAFTimestamps, colAGRemarks, colAHChecks, colAITimestamps, colAJRemarks, lrNumbers]);
 
   // Virtual Pagination for Product Automation & Closed Orders to prevent browser crash/freeze
   const [automationPage, setAutomationPage] = useState(1);
@@ -2427,15 +2924,15 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       else if (col === 'Q') set.add(o.salesPerson || '');
       else if (col === 'R') set.add(o.salesPersonContact || '');
       else if (col === 'S') set.add(o.orderNo || 'Set SO#');
-      else if (col === 'T') set.add(o.customerMailId || o.customerEmail || '');
+      else if (col === 'T') set.add((colTEmails[o.orderKey] ?? o.customerMailId ?? o.customerEmail ?? '').trim());
       else if (col === 'U') o.items.forEach(it => set.add(String(it.dispatchQty ?? 0)));
       else if (col === 'V') o.items.forEach(it => set.add(String(it.balanceQty ?? '')));
       else if (col === 'W') set.add(colWStatuses[o.orderKey] ?? (o.accountStatus || 'In Production'));
       else if (col === 'X') set.add(colXRemarks[o.orderKey] ?? '');
       else if (col === 'Y') set.add(o.approvalStatus || 'APPROVED');
       else if (col === 'Z') set.add(o.orderNoTimestamp || o.timestamp || '');
-      else if (col === 'AA') set.add('Sent');
-      else if (col === 'AB') set.add('Delivered');
+      else if (col === 'AA') set.add(colMailAAStatuses[o.orderKey] || o.confirmationMail || 'Pending');
+      else if (col === 'AB') set.add(colMailABStatuses[o.orderKey] || o.mailStatus || 'Pending');
       else if (col === 'AC') set.add(acStatuses[o.orderKey] || 'Pending');
       else if (col === 'AE') set.add(colAEChecks[o.orderKey] ? 'Checked' : 'Unchecked');
       else if (col === 'AF') set.add(colAFTimestamps[o.orderKey] || '—');
@@ -2447,7 +2944,12 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       else if (col === 'AL') set.add(lrNumbers[o.orderKey] || '');
       else if (col === 'AM') o.items.forEach(it => set.add(isItemComplete(it.statusAN) ? 'Complete' : (it.statusAN || 'Open')));
       else if (col === 'AN') set.add(anStatuses[o.orderKey] || 'Pending');
-      else if (col === 'AP') set.add(o.customerMailId || o.customerEmail || '');
+      else if (col === 'AP') {
+        const rawAP = (colAPStatuses[o.orderKey] ?? o.deliveryEmail ?? '').trim();
+        set.add(rawAP.toLowerCase() === 'sent' ? 'Mail Sent' : 'Pending');
+      } else if (col === 'AQ') {
+        set.add((colAQStatuses[o.orderKey] ?? o.deliveryEmailStatus ?? '').trim() || 'Pending');
+      }
     });
     return Array.from(set).filter(v => v !== undefined && v !== null && String(v).trim() !== '').slice(0, 50);
   };
@@ -2863,20 +3365,20 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             onScroll={handleTableScroll}
             className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-140px)] max-h-[89vh]' : 'h-[640px] max-h-[74vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}
           >
-            <table className="w-full border-collapse text-xs text-left">
+            <table className="table-auto w-max min-w-full border-collapse text-xs text-left">
             {/* The Sticky Column Letters Header with Rich Fill Colors */}
             <thead className={`${freezeRows === 1 ? 'sticky top-0 z-30' : ''} select-none border-b-2 border-slate-900`}>
               <tr className="font-mono text-[11px]">
                 {/* # Column */}
                 <th
-                  className={`w-12 px-2 py-1 text-center bg-slate-900 text-slate-300 border-r border-slate-800 font-bold ${
+                  className={`w-10 px-1.5 py-1 text-center bg-slate-900 text-slate-300 border-r border-slate-800 font-bold ${
                     freezeColumns >= 1 ? 'sticky left-0 z-40 bg-slate-900 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]' : ''
                   }`}
                 >
                   #
                 </th>
                 {/* Action Column */}
-                <th className="w-14 px-2 py-1 text-center bg-slate-900 text-slate-300 border-r border-slate-800 font-bold">
+                <th className="w-12 px-1.5 py-1 text-center bg-slate-900 text-slate-300 border-r border-slate-800 font-bold">
                   Action
                 </th>
 
@@ -2911,15 +3413,15 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   // Sticky freeze column styles
                   let stickyStyle = '';
                   if (col.sheetCol === 'B' && freezeColumns >= 2) {
-                    stickyStyle = 'sticky left-[48px] z-40 bg-sky-950 text-sky-100 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
+                    stickyStyle = 'sticky left-[40px] z-40 bg-sky-950 text-sky-100 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
                   } else if (col.sheetCol === 'C' && freezeColumns >= 3) {
-                    stickyStyle = 'sticky left-[158px] z-40 bg-sky-950 text-sky-100 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
+                    stickyStyle = 'sticky left-[150px] z-40 bg-sky-950 text-sky-100 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
                   }
 
                   return (
                     <th
                       key={col.sheetCol}
-                      className={`px-2 py-1 text-center font-bold ${bgColor} ${stickyStyle}`}
+                      className={`px-1.5 py-1 text-center font-bold whitespace-nowrap ${bgColor} ${stickyStyle}`}
                     >
                       <div className="flex items-center justify-center gap-1">
                         <span>{col.sheetCol}</span>
@@ -2940,13 +3442,13 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               {/* Row 2: Human Readable Column Names with Filters & Elegant Fill Color */}
               <tr className="bg-slate-800 text-slate-100 font-sans text-[11px] font-semibold border-b-2 border-slate-950">
                 <th
-                  className={`px-2 py-1 text-center bg-slate-900 text-slate-400 border-r border-slate-700 ${
+                  className={`px-1.5 py-1 text-center bg-slate-900 text-slate-400 border-r border-slate-700 ${
                     freezeColumns >= 1 ? 'sticky left-0 z-40 bg-slate-900 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]' : ''
                   }`}
                 >
                   1
                 </th>
-                <th className="px-2 py-1 text-center bg-slate-900 text-slate-400 border-r border-slate-700 text-[10px]">
+                <th className="px-1.5 py-1 text-center bg-slate-900 text-slate-400 border-r border-slate-700 text-[10px]">
                   Action
                 </th>
 
@@ -2954,20 +3456,20 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   if (!visibleCols[col.sheetCol]) return null;
                   const isFiltered = colFilters[col.sheetCol] && colFilters[col.sheetCol].length > 0;
 
-                  // Rich fill color for specific functional groups
+                  // Rich fill color for specific functional groups (compact content-fitted widths)
                   let bgHead = 'bg-slate-800 text-slate-100 border-r border-slate-700';
                   if (col.sheetCol === 'Y') {
                     bgHead = 'bg-amber-950 text-amber-200 border-r border-amber-800 font-bold';
                   } else if (col.sheetCol === 'Z') {
                     bgHead = 'bg-emerald-950 text-emerald-200 border-r border-emerald-800 font-bold';
                   } else if (['AA', 'AB'].includes(col.sheetCol)) {
-                    bgHead = 'bg-teal-900 text-teal-100 border-r border-teal-800 font-bold min-w-[120px]';
+                    bgHead = 'bg-teal-900 text-teal-100 border-r border-teal-800 font-bold';
                   } else if (['AG', 'AH', 'AI'].includes(col.sheetCol)) {
-                    bgHead = 'bg-emerald-900 text-emerald-100 border-r border-emerald-800 font-bold min-w-[120px]';
+                    bgHead = 'bg-emerald-900 text-emerald-100 border-r border-emerald-800 font-bold';
                   } else if (['AJ', 'AK', 'AL'].includes(col.sheetCol)) {
-                    bgHead = 'bg-sky-900 text-sky-100 border-r border-sky-800 font-bold min-w-[120px]';
+                    bgHead = 'bg-sky-900 text-sky-100 border-r border-sky-800 font-bold';
                   } else if (col.sheetCol === 'AN') {
-                    bgHead = 'bg-blue-950 text-sky-200 border-r border-blue-800 min-w-[140px] font-bold';
+                    bgHead = 'bg-blue-950 text-sky-200 border-r border-blue-800 font-bold';
                   } else if (['A', 'B', 'C', 'D', 'E'].includes(col.sheetCol)) {
                     bgHead = 'bg-slate-850 text-sky-100 border-r border-slate-700';
                   }
@@ -2975,18 +3477,18 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   // Sticky freeze column styles
                   let stickyStyle = '';
                   if (col.sheetCol === 'B' && freezeColumns >= 2) {
-                    stickyStyle = 'sticky left-[48px] z-40 bg-slate-850 text-sky-200 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
+                    stickyStyle = 'sticky left-[40px] z-40 bg-slate-850 text-sky-200 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
                   } else if (col.sheetCol === 'C' && freezeColumns >= 3) {
-                    stickyStyle = 'sticky left-[158px] z-40 bg-slate-850 text-sky-200 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
+                    stickyStyle = 'sticky left-[150px] z-40 bg-slate-850 text-sky-200 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.3)]';
                   }
 
                   return (
                     <th
                       key={col.sheetCol}
-                      className={`px-2 py-1 whitespace-nowrap ${bgHead} ${stickyStyle}`}
+                      className={`px-1.5 py-1 whitespace-nowrap ${bgHead} ${stickyStyle}`}
                     >
-                      <div className="flex items-center justify-between gap-1.5">
-                        <span className="truncate">{col.name}</span>
+                      <div className="flex items-center justify-between gap-1">
+                        <span>{col.name}</span>
                         {/* Filter on EVERY column */}
                         <button
                           onClick={() => setActiveFilterCol(activeFilterCol === col.sheetCol ? null : col.sheetCol)}
@@ -3040,6 +3542,17 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                     onUpdateColW: handleUpdateColW,
                     colXRemarks,
                     onUpdateColX: handleUpdateColX,
+                    colTEmails,
+                    onUpdateColT: handleUpdateColT,
+                    onCommitColT: handleCommitColT,
+                    colMailAAStatuses,
+                    colMailABStatuses,
+                    sendingMailOrderKey,
+                    onConfirmationMailChange: handleConfirmationMailChange,
+                    colAPStatuses,
+                    colAQStatuses,
+                    creatingDraftOrderKey,
+                    onDeliveryEmailChange: handleDeliveryEmailChange,
                     colAEChecks,
                     onToggleColAE: handleToggleColAE,
                     colAFTimestamps,
@@ -4288,7 +4801,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   2-Way Google Sheet Centralization (App ⇄ Google Sheet)
                 </h3>
                 <p className="text-[11px] text-emerald-100">
-                  App me Order No (Col S), Dispatch Qnt (Col U), ya Col AM edit karte hi direct Google Sheet update hoga
+                  App me Order No (Col S), Dispatch Qnt (Col U), Confirmation Mail (Col AA ➔ AB), Delivery Email Draft (Col AP ➔ AQ Gmail Draft), ya Col AM edit karte hi direct Google Sheet update hoga
                 </p>
               </div>
               <button
@@ -4455,6 +4968,17 @@ function renderSpreadsheetRows(
     onUpdateColW: (orderKey: string, val: string) => void;
     colXRemarks: Record<string, string>;
     onUpdateColX: (orderKey: string, val: string) => void;
+    colTEmails: Record<string, string>;
+    onUpdateColT: (orderKey: string, val: string) => void;
+    onCommitColT: (order: GroupedOrder, val: string) => void;
+    colMailAAStatuses: Record<string, string>;
+    colMailABStatuses: Record<string, string>;
+    sendingMailOrderKey: string | null;
+    onConfirmationMailChange: (order: GroupedOrder, val: 'Pending' | 'Sent') => void;
+    colAPStatuses: Record<string, string>;
+    colAQStatuses: Record<string, string>;
+    creatingDraftOrderKey: string | null;
+    onDeliveryEmailChange: (order: GroupedOrder, val: 'Pending' | 'Sent') => void;
     colAEChecks: Record<string, boolean>;
     onToggleColAE: (orderKey: string, checked: boolean) => void;
     colAFTimestamps: Record<string, string>;
@@ -4490,8 +5014,8 @@ function renderSpreadsheetRows(
 
       // Freeze column positioning styles
       const numSticky = freezeColumns >= 1 ? 'sticky left-0 z-20 bg-slate-50 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.15)]' : '';
-      const poSticky = freezeColumns >= 2 ? 'sticky left-[48px] z-20 bg-blue-50/90 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.15)]' : '';
-      const nameSticky = freezeColumns >= 3 ? 'sticky left-[158px] z-20 bg-blue-50/90 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.15)]' : '';
+      const poSticky = freezeColumns >= 2 ? 'sticky left-[40px] z-20 bg-blue-50/90 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.15)]' : '';
+      const nameSticky = freezeColumns >= 3 ? 'sticky left-[150px] z-20 bg-blue-50/90 shadow-[2px_0_4px_-1px_rgba(0,0,0,0.15)]' : '';
 
       rows.push(
         <tr
@@ -4758,15 +5282,34 @@ function renderSpreadsheetRows(
                 </td>
               )}
 
-              {/* Col T: Customer Mail Id */}
-              {visibleCols['T'] && (
-                <td
-                  rowSpan={rowSpan}
-                  className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle bg-blue-50/20 whitespace-nowrap text-[10px] ${cellBottomBorder}`}
-                >
-                  {order.customerMailId || order.customerEmail || '—'}
-                </td>
-              )}
+              {/* Col T: Customer Mail Id (Editable inline + content-fitted width + 2-Way Google Sheet Sync) */}
+              {visibleCols['T'] && (() => {
+                const emailVal = handlers.colTEmails[currentOrderKey] ?? order.customerMailId ?? order.customerEmail ?? '';
+                const widthCh = Math.min(34, Math.max(12, emailVal.length + 2));
+                return (
+                  <td
+                    rowSpan={rowSpan}
+                    className={`px-1 py-0.5 border-r border-slate-300 align-middle bg-blue-50/20 whitespace-nowrap ${cellBottomBorder}`}
+                  >
+                    <input
+                      type="email"
+                      value={emailVal}
+                      placeholder="Add email..."
+                      style={{ width: `${widthCh}ch` }}
+                      onChange={(e) => handlers.onUpdateColT(currentOrderKey, e.target.value)}
+                      onBlur={(e) => handlers.onCommitColT(order, e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          e.currentTarget.blur();
+                        }
+                      }}
+                      className="px-1.5 py-0.5 text-[11px] text-slate-800 bg-transparent hover:bg-white focus:bg-white border border-transparent hover:border-blue-300 focus:border-blue-500 rounded h-6 focus:outline-none transition-colors"
+                      title="Col T: Editable Customer Mail Id (Enter ya bahar click karne par Google Sheet me save hoga)"
+                    />
+                  </td>
+                );
+              })()}
             </>
           )}
 
@@ -4781,8 +5324,9 @@ function renderSpreadsheetRows(
                   step="any"
                   value={item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : ''}
                   placeholder="0"
+                  style={{ width: `${Math.min(12, Math.max(6, String(item.dispatchQty ?? '').length + 3))}ch` }}
                   onChange={(e) => handlers.onDispatchChange(order.orderKey, item, e.target.value)}
-                  className="w-18 px-1.5 py-0.5 text-right font-mono text-[11px] font-bold text-amber-950 bg-white border border-amber-300 rounded focus:ring-1 focus:ring-amber-500 focus:outline-none h-6 print:hidden"
+                  className="px-1.5 py-0.5 text-right font-mono text-[11px] font-bold text-amber-950 bg-white border border-amber-300 rounded focus:ring-1 focus:ring-amber-500 focus:outline-none h-6 print:hidden"
                 />
                 <span className="hidden print:inline-block font-mono font-bold text-slate-900 text-[11px]">
                   {item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : 0}
@@ -4829,32 +5373,40 @@ function renderSpreadsheetRows(
           {showHeaderCols && (
             <>
               {/* Col W: Status (Manual User Text Edit with Auto-Save) */}
-              {visibleCols['W'] && (
-                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle ${cellBottomBorder}`}>
-                  <input
-                    type="text"
-                    placeholder="Status..."
-                    value={handlers.colWStatuses[currentOrderKey] ?? (order.accountStatus || 'In Production')}
-                    onChange={(e) => handlers.onUpdateColW(currentOrderKey, e.target.value)}
-                    className="w-28 px-1.5 py-0.5 border border-teal-300 rounded text-[11px] font-semibold text-slate-800 bg-teal-50/20 focus:bg-white focus:outline-none focus:ring-1 focus:ring-teal-500 h-6 shadow-2xs"
-                    title="Col W: Editable Status (Auto-saved)"
-                  />
-                </td>
-              )}
+              {visibleCols['W'] && (() => {
+                const colWVal = handlers.colWStatuses[currentOrderKey] ?? (order.accountStatus || 'In Production');
+                return (
+                  <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle whitespace-nowrap ${cellBottomBorder}`}>
+                    <input
+                      type="text"
+                      placeholder="Status..."
+                      value={colWVal}
+                      style={{ width: `${Math.min(20, Math.max(10, colWVal.length + 2))}ch` }}
+                      onChange={(e) => handlers.onUpdateColW(currentOrderKey, e.target.value)}
+                      className="px-1.5 py-0.5 border border-teal-300 rounded text-[11px] font-semibold text-slate-800 bg-teal-50/20 focus:bg-white focus:outline-none focus:ring-1 focus:ring-teal-500 h-6 shadow-2xs"
+                      title="Col W: Editable Status (Auto-saved)"
+                    />
+                  </td>
+                );
+              })()}
 
               {/* Col X: Remark (Manual User Text Edit with Auto-Save) */}
-              {visibleCols['X'] && (
-                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle ${cellBottomBorder}`}>
-                  <input
-                    type="text"
-                    placeholder="Remark..."
-                    value={handlers.colXRemarks[currentOrderKey] ?? ''}
-                    onChange={(e) => handlers.onUpdateColX(currentOrderKey, e.target.value)}
-                    className="w-32 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 h-6 shadow-2xs"
-                    title="Col X: Editable Logistics Remark (Auto-saved)"
-                  />
-                </td>
-              )}
+              {visibleCols['X'] && (() => {
+                const colXVal = handlers.colXRemarks[currentOrderKey] ?? '';
+                return (
+                  <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle whitespace-nowrap ${cellBottomBorder}`}>
+                    <input
+                      type="text"
+                      placeholder="Remark..."
+                      value={colXVal}
+                      style={{ width: `${Math.min(24, Math.max(10, colXVal.length + 2))}ch` }}
+                      onChange={(e) => handlers.onUpdateColX(currentOrderKey, e.target.value)}
+                      className="px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 h-6 shadow-2xs"
+                      title="Col X: Editable Logistics Remark (Auto-saved)"
+                    />
+                  </td>
+                );
+              })()}
 
               {/* Col Y: Approval */}
               {visibleCols['Y'] && (
@@ -4872,19 +5424,71 @@ function renderSpreadsheetRows(
                 </td>
               )}
 
-              {/* Col AA: Confirmation Mail */}
-              {visibleCols['AA'] && (
-                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 align-middle text-[11px] font-medium text-center ${cellBottomBorder}`}>
-                  Sent
-                </td>
-              )}
+              {/* Col AA: Confirmation Mail ("Pending" | "Sent" -> Sends Order Confirmation Email) */}
+              {visibleCols['AA'] && (() => {
+                const rawAA = (handlers.colMailAAStatuses[currentOrderKey] ?? order.confirmationMail ?? '').trim();
+                const aaVal: 'Pending' | 'Sent' = rawAA.toLowerCase() === 'sent' ? 'Sent' : 'Pending';
+                const isSendingThis = handlers.sendingMailOrderKey === currentOrderKey;
+                return (
+                  <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle whitespace-nowrap ${cellBottomBorder} ${aaVal === 'Sent' ? 'bg-emerald-50/30' : 'bg-amber-50/20'}`}>
+                    <div className="inline-flex items-center gap-1">
+                      <select
+                        value={aaVal}
+                        disabled={isSendingThis}
+                        onChange={(e) => handlers.onConfirmationMailChange(order, e.target.value as 'Pending' | 'Sent')}
+                        className={`text-[10px] rounded px-1.5 py-0.5 font-bold focus:ring-1 focus:outline-none h-6 cursor-pointer disabled:opacity-60 ${
+                          aaVal === 'Sent'
+                            ? 'bg-emerald-100 border border-emerald-400 text-emerald-900 focus:ring-emerald-500'
+                            : 'bg-white border border-slate-300 text-slate-700 focus:ring-blue-500'
+                        }`}
+                        title={
+                          order.customerMailId || order.customerEmail
+                            ? `Select "Sent" to send Order Confirmation Email to ${order.customerMailId || order.customerEmail}`
+                            : 'No Customer Mail ID in Col T'
+                        }
+                      >
+                        <option value="Pending">Pending</option>
+                        <option value="Sent">Sent</option>
+                      </select>
+                      {isSendingThis && <Loader2 className="w-3 h-3 text-sky-600 animate-spin shrink-0" />}
+                    </div>
+                  </td>
+                );
+              })()}
 
-              {/* Col AB: Mail Status */}
-              {visibleCols['AB'] && (
-                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-emerald-700 font-medium align-middle text-[11px] text-center ${cellBottomBorder}`}>
-                  Delivered
-                </td>
-              )}
+              {/* Col AB: Mail Status ("Pending" | "Sending..." | "Sent Successfully" | "Delivered" | "No Mail ID Found" | Error) */}
+              {visibleCols['AB'] && (() => {
+                const mailStatus = (handlers.colMailABStatuses[currentOrderKey] ?? order.mailStatus ?? '').trim() || 'Pending';
+                const lower = mailStatus.toLowerCase();
+                const isSentOk = lower.includes('sent successfully') || lower === 'delivered';
+                const isSending = lower === 'sending...';
+                const isErr = lower.includes('no mail') || lower.includes('error') || lower.includes('update gas');
+                return (
+                  <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 align-middle text-[10px] text-center whitespace-nowrap ${cellBottomBorder}`}>
+                    {isSentOk ? (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 border border-emerald-300 font-bold">
+                        <CheckCircle2 className="w-3 h-3 shrink-0" />
+                        <span>{mailStatus}</span>
+                      </span>
+                    ) : isSending ? (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 border border-sky-300 font-semibold animate-pulse">
+                        <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                        <span>Sending...</span>
+                      </span>
+                    ) : isErr ? (
+                      <span
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-300 font-semibold max-w-[170px] truncate"
+                        title={mailStatus}
+                      >
+                        <AlertCircle className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{mailStatus}</span>
+                      </span>
+                    ) : (
+                      <span className="text-slate-400 italic font-medium">Pending</span>
+                    )}
+                  </td>
+                );
+              })()}
 
               {/* Col AC: Confirmation Msg (WhatsApp Sent) */}
               {visibleCols['AC'] && (
@@ -4949,18 +5553,22 @@ function renderSpreadsheetRows(
               )}
 
               {/* Col AG: Follow-up 1 Remark (Manual User Text Edit with Auto-Save - EDITABLE!) */}
-              {visibleCols['AG'] && (
-                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle ${cellBottomBorder}`}>
-                  <input
-                    type="text"
-                    placeholder="Follow-up 1 remark..."
-                    value={handlers.colAGRemarks[currentOrderKey] ?? ''}
-                    onChange={(e) => handlers.onUpdateColAG(currentOrderKey, e.target.value)}
-                    className="w-36 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 h-6 shadow-2xs"
-                    title="Col AG: Editable Follow-up 1 Remark (Auto-saved)"
-                  />
-                </td>
-              )}
+              {visibleCols['AG'] && (() => {
+                const agVal = handlers.colAGRemarks[currentOrderKey] ?? '';
+                return (
+                  <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle whitespace-nowrap ${cellBottomBorder}`}>
+                    <input
+                      type="text"
+                      placeholder="Remark..."
+                      value={agVal}
+                      style={{ width: `${Math.min(24, Math.max(10, agVal.length + 2))}ch` }}
+                      onChange={(e) => handlers.onUpdateColAG(currentOrderKey, e.target.value)}
+                      className="px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500 h-6 shadow-2xs"
+                      title="Col AG: Editable Follow-up 1 Remark (Auto-saved)"
+                    />
+                  </td>
+                );
+              })()}
 
               {/* Col AH: Follow-up 2 (CHECKBOX - when clicked, auto timestamp in Col AI) */}
               {visibleCols['AH'] && (
@@ -4991,41 +5599,49 @@ function renderSpreadsheetRows(
               )}
 
               {/* Col AJ: Follow-up 2 Remark (Manual User Text Edit with Auto-Save - EDITABLE!) */}
-              {visibleCols['AJ'] && (
-                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle ${cellBottomBorder}`}>
-                  <input
-                    type="text"
-                    placeholder="Follow-up 2 remark..."
-                    value={handlers.colAJRemarks[currentOrderKey] ?? ''}
-                    onChange={(e) => handlers.onUpdateColAJ(currentOrderKey, e.target.value)}
-                    className="w-36 px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-sky-500 h-6 shadow-2xs"
-                    title="Col AJ: Editable Follow-up 2 Remark (Auto-saved)"
-                  />
-                </td>
-              )}
+              {visibleCols['AJ'] && (() => {
+                const ajVal = handlers.colAJRemarks[currentOrderKey] ?? '';
+                return (
+                  <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 align-middle whitespace-nowrap ${cellBottomBorder}`}>
+                    <input
+                      type="text"
+                      placeholder="Remark..."
+                      value={ajVal}
+                      style={{ width: `${Math.min(24, Math.max(10, ajVal.length + 2))}ch` }}
+                      onChange={(e) => handlers.onUpdateColAJ(currentOrderKey, e.target.value)}
+                      className="px-1.5 py-0.5 border border-slate-300 rounded text-[11px] text-slate-800 bg-white focus:outline-none focus:ring-1 focus:ring-sky-500 h-6 shadow-2xs"
+                      title="Col AJ: Editable Follow-up 2 Remark (Auto-saved)"
+                    />
+                  </td>
+                );
+              })()}
 
               {/* Col AK: Transport Name */}
               {visibleCols['AK'] && (
-                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-slate-700 align-middle text-[11px] ${cellBottomBorder}`}>
+                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 text-slate-700 align-middle whitespace-nowrap text-[11px] ${cellBottomBorder}`}>
                   {order.transporterName || 'Atc express'}
                 </td>
               )}
 
               {/* Col AL: LR- Number */}
-              {visibleCols['AL'] && (
-                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 font-mono text-slate-800 align-middle ${cellBottomBorder}`}>
-                  <input
-                    type="text"
-                    placeholder="e.g. MEHTA-0041"
-                    value={handlers.lrNumbers[currentOrderKey] || ''}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      handlers.setLrNumbers(prev => ({ ...prev, [currentOrderKey]: val }));
-                    }}
-                    className="w-24 px-1.5 py-0.5 border border-slate-300 rounded font-mono text-[11px] h-6"
-                  />
-                </td>
-              )}
+              {visibleCols['AL'] && (() => {
+                const lrVal = handlers.lrNumbers[currentOrderKey] || '';
+                return (
+                  <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 font-mono text-slate-800 align-middle whitespace-nowrap ${cellBottomBorder}`}>
+                    <input
+                      type="text"
+                      placeholder="LR No..."
+                      value={lrVal}
+                      style={{ width: `${Math.min(18, Math.max(9, lrVal.length + 2))}ch` }}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        handlers.setLrNumbers(prev => ({ ...prev, [currentOrderKey]: val }));
+                      }}
+                      className="px-1.5 py-0.5 border border-slate-300 rounded font-mono text-[11px] h-6"
+                    />
+                  </td>
+                );
+              })()}
             </>
           )}
 
@@ -5103,29 +5719,78 @@ function renderSpreadsheetRows(
                 </td>
               )}
 
-              {/* Col AP: Delivery Email */}
-              {visibleCols['AP'] && (
-                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-slate-600 align-middle text-[10px] ${cellBottomBorder}`}>
-                  {order.customerMailId || order.customerEmail || '—'}
-                </td>
-              )}
+              {/* Col AP: Delivery Email ("Pending" | "Mail Sent" [value="Sent"] -> Creates Gmail Draft) */}
+              {visibleCols['AP'] && (() => {
+                const rawAP = (handlers.colAPStatuses[currentOrderKey] ?? order.deliveryEmail ?? '').trim();
+                const apVal: 'Pending' | 'Sent' = rawAP.toLowerCase() === 'sent' ? 'Sent' : 'Pending';
+                const isCreatingThis = handlers.creatingDraftOrderKey === currentOrderKey;
+                const targetEmail = (order.customerMailId || order.customerEmail || '').trim();
+                return (
+                  <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 text-center align-middle whitespace-nowrap ${cellBottomBorder} ${apVal === 'Sent' ? 'bg-emerald-50/30' : 'bg-blue-50/20'}`}>
+                    <div className="inline-flex items-center gap-1">
+                      <select
+                        value={apVal}
+                        disabled={isCreatingThis}
+                        onChange={(e) => handlers.onDeliveryEmailChange(order, e.target.value as 'Pending' | 'Sent')}
+                        className={`text-[10px] rounded px-1.5 py-0.5 font-bold focus:ring-1 focus:outline-none h-6 cursor-pointer disabled:opacity-60 ${
+                          apVal === 'Sent'
+                            ? 'bg-emerald-100 border border-emerald-400 text-emerald-900 focus:ring-emerald-500'
+                            : 'bg-white border border-blue-300 text-slate-700 focus:ring-blue-500'
+                        }`}
+                        title={
+                          targetEmail
+                            ? `Select "Mail Sent" to create Dispatch Draft in Gmail for ${targetEmail}`
+                            : 'No Customer Mail ID in Col T'
+                        }
+                      >
+                        <option value="Pending">Pending</option>
+                        <option value="Sent">Mail Sent</option>
+                      </select>
+                      {isCreatingThis && <Loader2 className="w-3 h-3 text-sky-600 animate-spin shrink-0" />}
+                    </div>
+                  </td>
+                );
+              })()}
 
-              {/* Col AQ: Delivery Email Link */}
-              {visibleCols['AQ'] && (
-                <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 text-blue-600 align-middle text-center text-[10px] ${cellBottomBorder}`}>
-                  {order.customerMailId || order.customerEmail ? (
-                    <a
-                      href={`mailto:${order.customerMailId || order.customerEmail}?subject=Dispatch%20Details%20Order%20${encodeURIComponent(order.orderNo || '')}&body=Dear%20Customer,%0A%0AYour%20order%20has%20been%20dispatched.`}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold text-blue-600 hover:text-blue-800 hover:underline"
-                    >
-                      <span>Send Email</span>
-                      <ExternalLink className="w-2.5 h-2.5" />
-                    </a>
-                  ) : (
-                    <span className="text-slate-400 italic">—</span>
-                  )}
-                </td>
-              )}
+              {/* Col AQ: Delivery Email Link ("Pending" | Clickable "✅ Draft Created in Gmail" -> Opens Gmail Drafts) */}
+              {visibleCols['AQ'] && (() => {
+                const aqStatus = (handlers.colAQStatuses[currentOrderKey] ?? order.deliveryEmailStatus ?? '').trim() || 'Pending';
+                const lower = aqStatus.toLowerCase();
+                const isDraftCreated = lower.includes('draft created in gmail') || aqStatus === '✅ Draft Created in Gmail';
+                const isCreating = lower === 'creating draft...';
+                const isErr = lower.includes('error') || lower.includes('no email') || lower.includes('update gas') || aqStatus.startsWith('❌');
+                return (
+                  <td rowSpan={rowSpan} className={`px-2 py-0.5 border-r border-slate-300 align-middle text-center text-[10px] whitespace-nowrap ${cellBottomBorder}`}>
+                    {isDraftCreated ? (
+                      <a
+                        href="https://mail.google.com/mail/#drafts"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 hover:bg-emerald-200 text-emerald-900 border border-emerald-400 font-bold transition-colors shadow-2xs"
+                        title={`Open Gmail Drafts to attach documents & send to ${order.customerMailId || order.customerEmail || 'customer'}`}
+                      >
+                        <span>✅ Draft Created in Gmail</span>
+                        <ExternalLink className="w-2.5 h-2.5 shrink-0 text-emerald-700" />
+                      </a>
+                    ) : isCreating ? (
+                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-sky-100 text-sky-800 border border-sky-300 font-semibold animate-pulse">
+                        <Loader2 className="w-3 h-3 animate-spin shrink-0" />
+                        <span>Creating Draft...</span>
+                      </span>
+                    ) : isErr ? (
+                      <span
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-100 text-rose-800 border border-rose-300 font-semibold max-w-[170px] truncate"
+                        title={aqStatus}
+                      >
+                        <AlertCircle className="w-3 h-3 shrink-0" />
+                        <span className="truncate">{aqStatus}</span>
+                      </span>
+                    ) : (
+                      <span className="text-slate-400 italic font-medium">Pending</span>
+                    )}
+                  </td>
+                );
+              })()}
             </>
           )}
         </tr>

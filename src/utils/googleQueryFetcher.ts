@@ -362,6 +362,8 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
       const operationalRemark = (r[23] || '').trim();    // Col X
       const approvalStatus = (r[24] || '').trim() || 'APPROVED'; // Col Y
       const orderNoTimestamp = (r[25] || '').trim();     // Col Z
+      const confirmationMail = (r[26] || '').trim();     // Col AA
+      const mailStatus = (r[27] || '').trim();           // Col AB
       const confirmationMsg = (r[28] || '').trim();      // Col AC
       const followUp1Raw = (r[30] || '').trim().toLowerCase(); // Col AE
       const followUp1 = followUp1Raw === 'true' || followUp1Raw === '✓' || followUp1Raw === 'yes';
@@ -389,6 +391,7 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
       const rawAN = (r[39] || '').trim();
       const deliveredWhatsappMsg = rawAN.toLowerCase() === 'sent' ? 'Message Sent' : (rawAN || 'Pending');
       const deliveryEmail = (r[41] || '').trim();        // Col AP
+      const deliveryEmailStatus = (r[42] || '').trim();  // Col AQ
 
       // Multi-line item cells (Cols D..L, U, V)
       const units = splitLines(r[3]);
@@ -455,6 +458,8 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
           approvalStatus,
           transporterName,
           lrNumber,
+          confirmationMail,
+          mailStatus,
           confirmationMsg,
           followUp1,
           followUp1Timestamp,
@@ -464,6 +469,7 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
           followUp2Remark,
           deliveredWhatsappMsg,
           deliveryEmail,
+          deliveryEmailStatus,
           statusAN: statusAM,
           dispatchQty,
           balanceQty
@@ -676,7 +682,7 @@ export async function fetchLiveGoogleQueryData(
 }
 
 export interface SheetWritePayload {
-  action: 'updateOrderNo' | 'updateDispatchQty' | 'updateStatusAM' | 'addOrderRow';
+  action: 'updateOrderNo' | 'updateDispatchQty' | 'updateStatusAM' | 'addOrderRow' | 'sendConfirmationMail' | 'createDeliveryDraft' | 'updateCustomerEmail';
   sheetRowIndex?: number;
   timestamp?: string;
   orderDate?: string;
@@ -686,6 +692,25 @@ export interface SheetWritePayload {
   orderNo?: string;
   dispatchQty?: number;
   statusAM?: string;
+  unit?: string;
+  email?: string;
+  billingAddress?: string;
+  salesPerson?: string;
+  transporterName?: string;
+  lrNumber?: string;
+  colAA?: string;
+  colAB?: string;
+  colAP?: string;
+  items?: Array<{
+    unit?: string;
+    itemName: string;
+    color: string;
+    width: string;
+    unitOfItem: string;
+    qty: number;
+    rate: number;
+    dispatchQty?: number;
+  }>;
   rowData?: Partial<ProductOrderRow>;
 }
 
@@ -693,7 +718,7 @@ export interface SheetWritePayload {
 export async function pushOrderUpdateToGoogleSheet(
   webAppUrl: string,
   payload: SheetWritePayload
-): Promise<{ ok: boolean; message: string }> {
+): Promise<{ ok: boolean; message: string; mailStatus?: string; draftStatus?: string; draftUrl?: string }> {
   const cleanUrl = (webAppUrl || '').trim();
   if (!cleanUrl.startsWith('https://script.google.com/')) {
     return { ok: false, message: 'Apps Script Web App URL not configured.' };
@@ -720,7 +745,10 @@ export async function pushOrderUpdateToGoogleSheet(
       const data = JSON.parse(rawText);
       return {
         ok: data.status === 'success' || data.ok === true,
-        message: data.message || 'Saved to Google Sheet!'
+        message: data.message || 'Saved to Google Sheet!',
+        mailStatus: data.mailStatus,
+        draftStatus: data.draftStatus,
+        draftUrl: data.draftUrl
       };
     } catch {
       if (rawText.includes('ServiceLogin') || rawText.includes('<!DOCTYPE html>')) {
