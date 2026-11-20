@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useLayoutEffect, useEffect } from 'react';
 import { ProductOrderRow } from '../types/fms';
 import { productOrderColumns } from '../data/sampleOrders';
 import { QUERY_COLUMN_MAPPINGS } from '../utils/googleQueryFetcher';
@@ -30,13 +30,15 @@ import {
   Edit3,
   Link2,
   Loader2,
-  ArrowUpDown
+  ArrowUpDown,
+  Pin
 } from 'lucide-react';
 
 interface ProductOrderViewProps {
   orders: ProductOrderRow[];
   searchTerm?: string;
   setSearchTerm?: (val: string) => void;
+  visibleCols?: Record<string, boolean>;
   isFullWidth: boolean;
   onGenerateOrderNo: (orderId: string, customNo?: string) => void;
   onGenerateAllPending?: () => void;
@@ -101,6 +103,7 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
   orders,
   searchTerm,
   setSearchTerm,
+  visibleCols,
   isFullWidth,
   onGenerateOrderNo,
   onGenerateAllPending,
@@ -131,6 +134,34 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
   const [showQueryMap, setShowQueryMap] = useState(false);
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
   const [navNotification, setNavNotification] = useState<string | null>(null);
+
+  // Freeze / Unfreeze columns state for Product Order (persisted in localStorage)
+  type FreezeTarget = 'NONE' | '#' | 'A' | 'B' | 'C' | 'D' | 'E';
+  const [freezeUpTo, setFreezeUpTo] = useState<FreezeTarget>(() => {
+    try {
+      const saved = localStorage.getItem('ginza_po_freeze_col_v1') as FreezeTarget | null;
+      if (saved && ['NONE', '#', 'A', 'B', 'C', 'D', 'E'].includes(saved)) return saved;
+    } catch {}
+    return 'B'; // Default: Freeze #, Timestamp (A), Customer Name (B)
+  });
+  const [lastFreezeTarget, setLastFreezeTarget] = useState<Exclude<FreezeTarget, 'NONE'>>(() => {
+    try {
+      const saved = localStorage.getItem('ginza_po_freeze_col_v1') as FreezeTarget | null;
+      if (saved && saved !== 'NONE' && ['#', 'A', 'B', 'C', 'D', 'E'].includes(saved)) {
+        return saved as Exclude<FreezeTarget, 'NONE'>;
+      }
+    } catch {}
+    return 'B';
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('ginza_po_freeze_col_v1', freezeUpTo);
+    } catch {}
+    if (freezeUpTo !== 'NONE') {
+      setLastFreezeTarget(freezeUpTo);
+    }
+  }, [freezeUpTo]);
 
   // Fast Virtual Pagination (Default 30 rows in view for zero-lag rendering)
   const [currentPage, setCurrentPage] = useState(1);
@@ -412,6 +443,36 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
               <option value="sheet">Sheet Row Order (Old → New)</option>
             </select>
           </div>
+          {/* Freeze / Unfreeze Controls */}
+          <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-1.5 py-0.5 shadow-2xs">
+            <button
+              type="button"
+              onClick={() => setFreezeUpTo(prev => (prev === 'NONE' ? lastFreezeTarget : 'NONE'))}
+              className={`px-2 py-0.5 rounded font-bold text-[11px] flex items-center gap-1 transition-colors cursor-pointer ${
+                freezeUpTo !== 'NONE'
+                  ? 'bg-sky-700 text-white hover:bg-sky-800'
+                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+              }`}
+              title={freezeUpTo !== 'NONE' ? 'Click to Unfreeze all columns' : 'Click to Freeze columns'}
+            >
+              <Pin className="w-3 h-3" />
+              <span>{freezeUpTo !== 'NONE' ? 'Freeze ON' : 'Unfrozen'}</span>
+            </button>
+            <select
+              value={freezeUpTo}
+              onChange={(e) => setFreezeUpTo(e.target.value as any)}
+              className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs pr-1"
+              title="Select which column to freeze up to"
+            >
+              <option value="NONE">Unfreeze All</option>
+              <option value="#">Freeze # Only</option>
+              <option value="A">Freeze up to Col A (Timestamp)</option>
+              <option value="B">Freeze up to Col B (Customer)</option>
+              <option value="C">Freeze up to Col C (Order Date)</option>
+              <option value="D">Freeze up to Col D (Unit)</option>
+              <option value="E">Freeze up to Col E (Item Name)</option>
+            </select>
+          </div>
         </div>
 
         {/* Right Side: Action Controls */}
@@ -427,299 +488,23 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
         </div>
       </div>
 
-      {/* 4. Main Flat Table Grid (Exact 19 Columns A to S) */}
-      <div className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-180px)] max-h-[85vh]' : 'h-[640px] max-h-[76vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}>
-        <table className="w-full border-collapse text-xs text-left">
-          {/* Header Row: Exact 19 Columns A to S */}
-          <thead className="sticky top-0 z-30 select-none border-b-2 border-slate-900 font-mono text-[11px]">
-            {/* Strip 1: Google Sheet Column Letters A to S */}
-            <tr className="bg-slate-900 text-slate-400 text-[10px]">
-              <th className="w-10 px-2 py-0.5 text-center bg-slate-950 text-slate-400 border-r border-slate-800 sticky left-0 z-40">
-                #
-              </th>
-              {productOrderColumns.map((col) => {
-                const isLockedQueryCol = col.colLetter !== 'S';
-                let tint = 'bg-slate-900 text-slate-300 border-r border-slate-800';
-                if (col.colLetter === 'S') tint = 'bg-emerald-950 text-emerald-300 border-r border-emerald-900 font-extrabold';
-                else if (['A', 'B', 'C'].includes(col.colLetter)) tint = 'bg-sky-950 text-sky-300 border-r border-sky-900';
-                else if (['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'].includes(col.colLetter)) tint = 'bg-amber-950 text-amber-300 border-r border-amber-800 font-bold';
-                else tint = 'bg-indigo-950 text-indigo-300 border-r border-indigo-900';
-
-                return (
-                  <th key={col.id} className={`px-2 py-0.5 text-center font-mono ${tint}`}>
-                    <span className="inline-flex items-center gap-1">
-                      <span>Col {col.colLetter}</span>
-                      {isLockedQueryCol ? (
-                        <span className="text-[9px] text-amber-400 font-normal opacity-80" title="Locked: Streamed from =QUERY(...) formula">🔒</span>
-                      ) : (
-                        <span className="text-[9px] text-emerald-300 font-bold" title="Unlocked: Enter or Generate Order Number">🔓</span>
-                      )}
-                    </span>
-                  </th>
-                );
-              })}
-            </tr>
-
-            {/* Strip 2: Exact Column Names */}
-            <tr className="border-t border-slate-700">
-              <th className="w-10 px-2 py-1.5 text-center bg-slate-900 text-slate-100 border-r border-slate-800 font-bold sticky left-0 z-40">
-                #
-              </th>
-              {productOrderColumns.map((col) => {
-                const isLockedQueryCol = col.colLetter !== 'S';
-                let bgHead = 'bg-slate-800 text-slate-100 border-r border-slate-700 font-bold';
-                if (col.colLetter === 'S') bgHead = 'bg-emerald-800 text-emerald-100 border-r border-emerald-700 font-extrabold shadow-sm';
-                else if (['A', 'B', 'C'].includes(col.colLetter)) bgHead = 'bg-sky-900 text-sky-100 border-r border-sky-800 font-bold';
-                else if (['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'].includes(col.colLetter)) bgHead = 'bg-amber-800 text-amber-100 border-r border-amber-700 font-extrabold shadow-sm';
-                else bgHead = 'bg-indigo-900 text-indigo-100 border-r border-indigo-800 font-bold';
-
-                return (
-                  <th
-                    key={col.id}
-                    style={{ minWidth: col.minWidth || '110px' }}
-                    className={`px-2.5 py-1.5 whitespace-nowrap ${bgHead}`}
-                  >
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="font-semibold">{col.label}</span>
-                      {col.id === 'orderNo' ? (
-                        <span className="text-[9px] px-1 bg-amber-400 text-slate-950 rounded font-extrabold">
-                          TRIGGER 🔓
-                        </span>
-                      ) : (
-                        <span className="text-[9px] text-slate-400 font-mono" title="Read-only query column">
-                          🔒
-                        </span>
-                      )}
-                    </div>
-                  </th>
-                );
-              })}
-            </tr>
-          </thead>
-
-          {/* Table Body: 100% Exact 19 Columns */}
-          <tbody className="font-sans">
-            {filteredRows.length === 0 ? (
-              <tr>
-                <td colSpan={20} className="text-center py-12 text-slate-500 bg-white">
-                  <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                  <p className="font-semibold text-slate-700">No orders match the filter or search criteria in Product Order.</p>
-                  <p className="text-xs text-slate-400 mt-1">Try resetting the month/year filter, or click "Import Sheet" to load your orders.</p>
-                </td>
-              </tr>
-            ) : (
-              paginatedRows.map((row, index) => {
-                const hasOrderNo = Boolean(row.orderNo && row.orderNo.trim() !== '');
-                const isHighlighted = highlightedOrderId === row.orderId;
-                const rowIndex = (safeCurrentPage - 1) * (pageSize || 30) + index + 1;
-
-                let rowBgClass = hasOrderNo
-                  ? index % 2 === 0 ? 'bg-white' : 'bg-slate-50/70'
-                  : 'bg-amber-50/40 hover:bg-amber-50/70';
-
-                if (isHighlighted) {
-                  rowBgClass = 'bg-amber-100 ring-2 ring-amber-500 font-semibold shadow-md';
-                }
-
-                return (
-                  <tr
-                    key={row.orderId}
-                    id={`order-row-${row.orderId}`}
-                    className={`border-b border-slate-200 transition-colors hover:bg-sky-50/50 ${rowBgClass}`}
-                  >
-                    {/* # Google Sheet Row Number Column */}
-                    <td
-                      className="w-10 px-2 py-0.5 text-center font-mono font-bold text-slate-500 bg-slate-50/95 border-r border-slate-200 text-[11px] sticky left-0 z-20"
-                      title={row.sheetRowIndex ? `Google Sheet Row #${row.sheetRowIndex}` : `Row ${rowIndex}`}
-                    >
-                      {row.sheetRowIndex || rowIndex}
-                    </td>
-
-                    {/* Col A (1): Timestamp */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-600 font-mono whitespace-nowrap text-[11px]">
-                      {row.timestamp}
-                    </td>
-
-                    {/* Col B (2): Customer Name */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-bold text-slate-900 whitespace-nowrap text-[11px]">
-                      <div className="flex items-center gap-1 max-w-[130px] truncate" title={row.customerName}>
-                        <span className="truncate">{row.customerName}</span>
-                        {row.customerPO && row.customerPO !== 'N/A' && (
-                          <span className="text-[10px] text-slate-400 font-normal shrink-0">
-                            ({row.customerPO})
-                          </span>
-                        )}
-                      </div>
-                    </td>
-
-                    {/* Col C (3): Order Date */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-700 whitespace-nowrap text-[11px]">
-                      {row.orderDate}
-                    </td>
-
-                    {/* Col D (4): Unit */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-medium text-purple-900 whitespace-nowrap text-[11px]">
-                      <span className="px-1.5 py-0.2 rounded bg-purple-50 text-purple-800 border border-purple-200 text-[10px] font-semibold">
-                        {row.unit || '—'}
-                      </span>
-                    </td>
-
-                    {/* Col E (5): Item Name */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-semibold text-slate-900 whitespace-nowrap text-[11px]">
-                      <div className="max-w-[120px] truncate" title={row.itemName}>
-                        {row.itemName}
-                      </div>
-                    </td>
-
-                    {/* Col F (6): Color */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-700 whitespace-nowrap text-[11px]">
-                      {row.color || '—'}
-                    </td>
-
-                    {/* Col G (7): Width */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-700 whitespace-nowrap text-[11px]">
-                      {row.width || '—'}
-                    </td>
-
-                    {/* Col H (8): Unit (of item) */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-mono text-slate-600 text-center text-[10px] whitespace-nowrap">
-                      {row.unitOfItem || 'MTR'}
-                    </td>
-
-                    {/* Col I (9): Qty */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-mono font-bold text-slate-900 text-right text-[11px]">
-                      {Number(row.qty).toLocaleString()}
-                    </td>
-
-                    {/* Col J (10): Rate */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-mono text-slate-700 text-right text-[11px]">
-                      ₹{row.rate}
-                    </td>
-
-                    {/* Col K (11): Discount */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-mono text-slate-600 text-center text-[11px]">
-                      {row.discount}%
-                    </td>
-
-                    {/* Col L (12): Delivery Date */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-700 whitespace-nowrap text-[11px]">
-                      {row.deliveryDate || '—'}
-                    </td>
-
-                    {/* Col M (13): Remark (Chipped with max-width) */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-600 text-[11px]">
-                      <span className="max-w-[110px] truncate px-1.5 py-0.2 rounded bg-slate-100 text-slate-700 border border-slate-200 block text-[10px]" title={row.remark}>
-                        {row.remark || '—'}
-                      </span>
-                    </td>
-
-                    {/* Col N (14): Customer Number */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-mono text-slate-700 whitespace-nowrap text-[11px]">
-                      {row.customerNumber || '—'}
-                    </td>
-
-                    {/* Col O (15): Billing Address (Chipped with max-width) */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-600 text-[10px]">
-                      <span className="max-w-[110px] truncate px-1.5 py-0.2 rounded bg-sky-50 text-sky-900 border border-sky-200 block" title={row.billingAddress}>
-                        {row.billingAddress || '—'}
-                      </span>
-                    </td>
-
-                    {/* Col P (16): Delivery Address (Chipped with max-width) */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-600 text-[10px]">
-                      <span className="max-w-[110px] truncate px-1.5 py-0.2 rounded bg-amber-50 text-amber-900 border border-amber-200 block" title={row.deliveryAddress}>
-                        {row.deliveryAddress || '—'}
-                      </span>
-                    </td>
-
-                    {/* Col Q (17): Sales Person Name */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 text-slate-800 font-medium whitespace-nowrap text-[11px]">
-                      {row.salesPerson || '—'}
-                    </td>
-
-                    {/* Col R (18): Sales Person Contact */}
-                    <td className="px-2 py-0.5 border-r border-slate-200 font-mono text-slate-700 whitespace-nowrap text-[11px]">
-                      {row.salesPersonContact || '—'}
-                    </td>
-
-                    {/* Col S (19): ORDER NUMBER - (Trigger Column into Product Automation & 2-Way Google Sheet Save) */}
-                    <td className="px-2.5 py-0.5 border-r border-slate-300 bg-emerald-50/40 whitespace-nowrap">
-                      {hasOrderNo && editingRowId !== row.orderId ? (
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-mono font-bold text-slate-900 px-2 py-0.5 rounded bg-white border border-slate-300 shadow-2xs text-[11px]">
-                            {row.orderNo}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setInputOrderNos(prev => ({ ...prev, [row.orderId]: row.orderNo || '' }));
-                              setEditingRowId(row.orderId);
-                            }}
-                            className="p-1 text-slate-500 hover:text-blue-700 hover:bg-blue-50 rounded transition-colors cursor-pointer"
-                            title="Edit Order No & sync with Google Sheet"
-                          >
-                            <Edit3 className="w-3 h-3" />
-                          </button>
-                          <span
-                            onClick={onNavigateToAutomation}
-                            className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-1.5 py-0.5 cursor-pointer hover:bg-emerald-200"
-                            title="Click to view in Product Automation"
-                          >
-                            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-                            <span>Active</span>
-                            <ExternalLink className="w-2.5 h-2.5 ml-0.5" />
-                          </span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-1.5">
-                          <input
-                            type="text"
-                            placeholder="e.g. MMFSO2526-01752"
-                            value={inputOrderNos[row.orderId] ?? ''}
-                            onChange={(e) => setInputOrderNos({ ...inputOrderNos, [row.orderId]: e.target.value })}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter') {
-                                e.preventDefault();
-                                const manualVal = inputOrderNos[row.orderId];
-                                onGenerateOrderNo(row.orderId, manualVal);
-                                setEditingRowId(null);
-                              }
-                            }}
-                            className="w-36 px-1.5 py-0.5 text-[11px] bg-white border border-amber-300 rounded font-mono font-semibold focus:outline-none focus:ring-1 focus:ring-amber-500"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const manualVal = inputOrderNos[row.orderId];
-                              onGenerateOrderNo(row.orderId, manualVal);
-                              setEditingRowId(null);
-                            }}
-                            className="px-2 py-0.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded text-[10px] flex items-center gap-1 transition-colors cursor-pointer shadow-2xs"
-                            title="Save Order No in App + Google Sheet & flow to Product Automation"
-                          >
-                            <Sparkles className="w-2.5 h-2.5" />
-                            <span>{editingRowId === row.orderId ? 'Save' : 'Assign'}</span>
-                          </button>
-                          {editingRowId === row.orderId && (
-                            <button
-                              type="button"
-                              onClick={() => setEditingRowId(null)}
-                              className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
-                              title="Cancel edit"
-                            >
-                              <X className="w-3 h-3" />
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
+      {/* 4. Main Flat Table Grid (Columns A to S with Hide/Show & Overlap-Free Frozen Columns) */}
+      <ProductOrderTableGrid
+        paginatedRows={paginatedRows}
+        filteredRowsCount={filteredRows.length}
+        visibleCols={visibleCols}
+        freezeUpTo={freezeUpTo}
+        isFullWidth={isFullWidth}
+        safeCurrentPage={safeCurrentPage}
+        pageSize={pageSize}
+        highlightedOrderId={highlightedOrderId}
+        editingRowId={editingRowId}
+        setEditingRowId={setEditingRowId}
+        inputOrderNos={inputOrderNos}
+        setInputOrderNos={setInputOrderNos}
+        onGenerateOrderNo={onGenerateOrderNo}
+        onNavigateToAutomation={onNavigateToAutomation}
+      />
 
       {/* 5. Pagination Bar */}
       <div className="flex flex-wrap items-center justify-between gap-3 px-3 py-2 bg-slate-100 border border-slate-300 rounded-lg text-xs text-slate-700">
@@ -1144,3 +929,440 @@ const NewProductOrderRowModal: React.FC<NewProductOrderRowModalProps> = ({ onClo
     </div>
   );
 };
+
+interface ProductOrderTableGridProps {
+  paginatedRows: ProductOrderRow[];
+  filteredRowsCount: number;
+  visibleCols?: Record<string, boolean>;
+  freezeUpTo: 'NONE' | '#' | 'A' | 'B' | 'C' | 'D' | 'E';
+  isFullWidth: boolean;
+  safeCurrentPage: number;
+  pageSize: number;
+  highlightedOrderId: string | null;
+  editingRowId: string | null;
+  setEditingRowId: (id: string | null) => void;
+  inputOrderNos: Record<string, string>;
+  setInputOrderNos: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  onGenerateOrderNo: (orderId: string, customNo?: string) => void;
+  onNavigateToAutomation: () => void;
+}
+
+const FREEZE_SEQUENCE: Array<'#' | 'A' | 'B' | 'C' | 'D' | 'E'> = ['#', 'A', 'B', 'C', 'D', 'E'];
+
+const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
+  paginatedRows,
+  filteredRowsCount,
+  visibleCols,
+  freezeUpTo,
+  isFullWidth,
+  safeCurrentPage,
+  pageSize,
+  highlightedOrderId,
+  editingRowId,
+  setEditingRowId,
+  inputOrderNos,
+  setInputOrderNos,
+  onGenerateOrderNo,
+  onNavigateToAutomation
+}) => {
+  const visibleColumns = useMemo(
+    () => productOrderColumns.filter(col => !visibleCols || visibleCols[col.colLetter] !== false),
+    [visibleCols]
+  );
+
+  const frozenKeys = useMemo(() => {
+    if (freezeUpTo === 'NONE') return [] as string[];
+    const maxIdx = FREEZE_SEQUENCE.indexOf(freezeUpTo);
+    const list: string[] = ['#'];
+    visibleColumns.forEach(col => {
+      const idx = FREEZE_SEQUENCE.indexOf(col.colLetter as any);
+      if (idx !== -1 && idx <= maxIdx) {
+        list.push(col.colLetter);
+      }
+    });
+    return list;
+  }, [freezeUpTo, visibleColumns]);
+
+  const frozenSet = useMemo(() => new Set(frozenKeys), [frozenKeys]);
+  const lastFrozenKey = frozenKeys.length > 0 ? frozenKeys[frozenKeys.length - 1] : null;
+
+  const headerRefs = useRef<Record<string, HTMLTableCellElement | null>>({});
+  const [frozenLeftOffsets, setFrozenLeftOffsets] = useState<Record<string, number>>({ '#': 0 });
+
+  useLayoutEffect(() => {
+    if (frozenKeys.length === 0) {
+      setFrozenLeftOffsets({});
+      return;
+    }
+
+    const computeOffsets = () => {
+      const next: Record<string, number> = {};
+      let acc = 0;
+      for (const key of frozenKeys) {
+        next[key] = acc;
+        const el = headerRefs.current[key];
+        if (el) {
+          acc += el.getBoundingClientRect().width;
+        }
+      }
+      setFrozenLeftOffsets(prev => {
+        const same =
+          Object.keys(next).length === Object.keys(prev).length &&
+          Object.keys(next).every(k => Math.abs((prev[k] ?? -1) - next[k]) < 0.5);
+        return same ? prev : next;
+      });
+    };
+
+    computeOffsets();
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(computeOffsets) : null;
+    if (ro) {
+      frozenKeys.forEach(k => {
+        const el = headerRefs.current[k];
+        if (el) ro.observe(el);
+      });
+    }
+    window.addEventListener('resize', computeOffsets);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', computeOffsets);
+    };
+  }, [frozenKeys, paginatedRows, isFullWidth]);
+
+  const getStickyHeaderProps = (key: string, defaultStyle?: React.CSSProperties) => {
+    if (!frozenSet.has(key)) {
+      return { style: defaultStyle, extraClass: '' };
+    }
+    const leftVal = frozenLeftOffsets[key] ?? 0;
+    const isLast = lastFrozenKey === key;
+    return {
+      style: { ...defaultStyle, left: `${leftVal}px` },
+      extraClass: `sticky z-40 ${isLast ? 'border-r-2 border-r-slate-400 shadow-[4px_0_8px_-2px_rgba(0,0,0,0.35)]' : ''}`
+    };
+  };
+
+  const getStickyBodyCellProps = (key: string, solidBgClass: string) => {
+    if (!frozenSet.has(key)) {
+      return { style: undefined, extraClass: solidBgClass };
+    }
+    const leftVal = frozenLeftOffsets[key] ?? 0;
+    const isLast = lastFrozenKey === key;
+    return {
+      style: { left: `${leftVal}px` },
+      extraClass: `sticky z-20 ${solidBgClass} ${isLast ? 'border-r-2 border-r-slate-400 shadow-[4px_0_8px_-2px_rgba(15,23,42,0.18)]' : ''}`
+    };
+  };
+
+  const renderCellContent = (colLetter: string, row: ProductOrderRow, hasOrderNo: boolean) => {
+    switch (colLetter) {
+      case 'A':
+        return <span className="text-slate-600 font-mono whitespace-nowrap text-[11px]">{row.timestamp}</span>;
+      case 'B':
+        return (
+          <div className="flex items-center gap-1 max-w-[140px] truncate font-bold text-slate-900 text-[11px]" title={row.customerName}>
+            <span className="truncate">{row.customerName}</span>
+            {row.customerPO && row.customerPO !== 'N/A' && (
+              <span className="text-[10px] text-slate-400 font-normal shrink-0">({row.customerPO})</span>
+            )}
+          </div>
+        );
+      case 'C':
+        return <span className="text-slate-700 whitespace-nowrap text-[11px]">{row.orderDate}</span>;
+      case 'D':
+        return (
+          <span className="px-1.5 py-0.2 rounded bg-purple-50 text-purple-800 border border-purple-200 text-[10px] font-semibold whitespace-nowrap">
+            {row.unit || '—'}
+          </span>
+        );
+      case 'E':
+        return (
+          <div className="max-w-[130px] truncate font-semibold text-slate-900 text-[11px]" title={row.itemName}>
+            {row.itemName}
+          </div>
+        );
+      case 'F':
+        return <span className="text-slate-700 whitespace-nowrap text-[11px]">{row.color || '—'}</span>;
+      case 'G':
+        return <span className="text-slate-700 whitespace-nowrap text-[11px]">{row.width || '—'}</span>;
+      case 'H':
+        return <span className="font-mono text-slate-600 text-[10px] whitespace-nowrap block text-center">{row.unitOfItem || 'MTR'}</span>;
+      case 'I':
+        return <span className="font-mono font-bold text-slate-900 text-[11px] block text-right">{Number(row.qty).toLocaleString()}</span>;
+      case 'J':
+        return <span className="font-mono text-slate-700 text-[11px] block text-right">₹{row.rate}</span>;
+      case 'K':
+        return <span className="font-mono text-slate-600 text-[11px] block text-center">{row.discount}%</span>;
+      case 'L':
+        return <span className="text-slate-700 whitespace-nowrap text-[11px]">{row.deliveryDate || '—'}</span>;
+      case 'M':
+        return (
+          <span className="max-w-[110px] truncate px-1.5 py-0.2 rounded bg-slate-100 text-slate-700 border border-slate-200 block text-[10px]" title={row.remark}>
+            {row.remark || '—'}
+          </span>
+        );
+      case 'N':
+        return <span className="font-mono text-slate-700 whitespace-nowrap text-[11px]">{row.customerNumber || '—'}</span>;
+      case 'O':
+        return (
+          <span className="max-w-[110px] truncate px-1.5 py-0.2 rounded bg-sky-50 text-sky-900 border border-sky-200 block text-[10px]" title={row.billingAddress}>
+            {row.billingAddress || '—'}
+          </span>
+        );
+      case 'P':
+        return (
+          <span className="max-w-[110px] truncate px-1.5 py-0.2 rounded bg-amber-50 text-amber-900 border border-amber-200 block text-[10px]" title={row.deliveryAddress}>
+            {row.deliveryAddress || '—'}
+          </span>
+        );
+      case 'Q':
+        return <span className="text-slate-800 font-medium whitespace-nowrap text-[11px]">{row.salesPerson || '—'}</span>;
+      case 'R':
+        return <span className="font-mono text-slate-700 whitespace-nowrap text-[11px]">{row.salesPersonContact || '—'}</span>;
+      case 'S':
+        if (hasOrderNo && editingRowId !== row.orderId) {
+          return (
+            <div className="flex items-center gap-1.5">
+              <span className="font-mono font-bold text-slate-900 px-2 py-0.5 rounded bg-white border border-slate-300 shadow-2xs text-[11px]">
+                {row.orderNo}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  setInputOrderNos(prev => ({ ...prev, [row.orderId]: row.orderNo || '' }));
+                  setEditingRowId(row.orderId);
+                }}
+                className="p-1 text-slate-500 hover:text-blue-700 hover:bg-blue-50 rounded transition-colors cursor-pointer"
+                title="Edit Order No & sync with Google Sheet"
+              >
+                <Edit3 className="w-3 h-3" />
+              </button>
+              <span
+                onClick={onNavigateToAutomation}
+                className="inline-flex items-center gap-1 text-[10px] font-bold text-emerald-800 bg-emerald-100 border border-emerald-300 rounded px-1.5 py-0.5 cursor-pointer hover:bg-emerald-200"
+                title="Click to view in Product Automation"
+              >
+                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                <span>Active</span>
+                <ExternalLink className="w-2.5 h-2.5 ml-0.5" />
+              </span>
+            </div>
+          );
+        }
+        return (
+          <div className="flex items-center gap-1.5">
+            <input
+              type="text"
+              placeholder="e.g. MMFSO2526-01752"
+              value={inputOrderNos[row.orderId] ?? ''}
+              onChange={(e) => setInputOrderNos({ ...inputOrderNos, [row.orderId]: e.target.value })}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const manualVal = inputOrderNos[row.orderId];
+                  onGenerateOrderNo(row.orderId, manualVal);
+                  setEditingRowId(null);
+                }
+              }}
+              className="w-36 px-1.5 py-0.5 text-[11px] bg-white border border-amber-300 rounded font-mono font-semibold focus:outline-none focus:ring-1 focus:ring-amber-500"
+            />
+            <button
+              type="button"
+              onClick={() => {
+                const manualVal = inputOrderNos[row.orderId];
+                onGenerateOrderNo(row.orderId, manualVal);
+                setEditingRowId(null);
+              }}
+              className="px-2 py-0.5 bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold rounded text-[10px] flex items-center gap-1 transition-colors cursor-pointer shadow-2xs"
+              title="Save Order No in App + Google Sheet & flow to Product Automation"
+            >
+              <Sparkles className="w-2.5 h-2.5" />
+              <span>{editingRowId === row.orderId ? 'Save' : 'Assign'}</span>
+            </button>
+            {editingRowId === row.orderId && (
+              <button
+                type="button"
+                onClick={() => setEditingRowId(null)}
+                className="p-0.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+                title="Cancel edit"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        );
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <div className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-180px)] max-h-[85vh]' : 'h-[640px] max-h-[76vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}>
+      <table className="w-full border-separate border-spacing-0 text-xs text-left">
+        {/* Sticky Header Rows */}
+        <thead className="sticky top-0 z-30 select-none font-mono text-[11px]">
+          {/* Strip 1: Google Sheet Column Letters */}
+          <tr className="bg-slate-900 text-slate-400 text-[10px]">
+            {(() => {
+              const sProps = getStickyHeaderProps('#', { minWidth: '44px', width: '44px' });
+              return (
+                <th
+                  style={sProps.style}
+                  className={`w-11 px-2 py-0.5 text-center bg-slate-950 text-slate-400 border-r border-b border-slate-800 ${sProps.extraClass}`}
+                >
+                  #
+                </th>
+              );
+            })()}
+            {visibleColumns.map((col) => {
+              const isLockedQueryCol = col.colLetter !== 'S';
+              let tint = 'bg-slate-900 text-slate-300 border-r border-b border-slate-800';
+              if (col.colLetter === 'S') tint = 'bg-emerald-950 text-emerald-300 border-r border-b border-emerald-900 font-extrabold';
+              else if (['A', 'B', 'C'].includes(col.colLetter)) tint = 'bg-sky-950 text-sky-300 border-r border-b border-sky-900';
+              else if (['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'].includes(col.colLetter)) tint = 'bg-amber-950 text-amber-300 border-r border-b border-amber-800 font-bold';
+              else tint = 'bg-indigo-950 text-indigo-300 border-r border-b border-indigo-900';
+
+              const sProps = getStickyHeaderProps(col.colLetter, { minWidth: col.minWidth || '110px' });
+
+              return (
+                <th
+                  key={col.id}
+                  style={sProps.style}
+                  className={`px-2 py-0.5 text-center font-mono whitespace-nowrap ${tint} ${sProps.extraClass}`}
+                >
+                  <span className="inline-flex items-center gap-1">
+                    <span>Col {col.colLetter}</span>
+                    {frozenSet.has(col.colLetter) && (
+                      <Pin className="w-2.5 h-2.5 text-sky-300 inline" />
+                    )}
+                    {isLockedQueryCol ? (
+                      <span className="text-[9px] text-amber-400 font-normal opacity-80" title="Locked: Streamed from =QUERY(...) formula">🔒</span>
+                    ) : (
+                      <span className="text-[9px] text-emerald-300 font-bold" title="Unlocked: Enter or Generate Order Number">🔓</span>
+                    )}
+                  </span>
+                </th>
+              );
+            })}
+          </tr>
+
+          {/* Strip 2: Exact Column Names (Measured for Exact Frozen Offsets) */}
+          <tr className="border-t border-slate-700">
+            {(() => {
+              const sProps = getStickyHeaderProps('#', { minWidth: '44px', width: '44px' });
+              return (
+                <th
+                  ref={(el) => { headerRefs.current['#'] = el; }}
+                  style={sProps.style}
+                  className={`w-11 px-2 py-1.5 text-center bg-slate-900 text-slate-100 border-r border-b-2 border-b-slate-950 border-slate-800 font-bold ${sProps.extraClass}`}
+                >
+                  #
+                </th>
+              );
+            })()}
+            {visibleColumns.map((col) => {
+              let bgHead = 'bg-slate-800 text-slate-100 border-r border-b-2 border-b-slate-950 border-slate-700 font-bold';
+              if (col.colLetter === 'S') bgHead = 'bg-emerald-800 text-emerald-100 border-r border-b-2 border-b-slate-950 border-emerald-700 font-extrabold';
+              else if (['A', 'B', 'C'].includes(col.colLetter)) bgHead = 'bg-sky-900 text-sky-100 border-r border-b-2 border-b-slate-950 border-sky-800 font-bold';
+              else if (['D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L'].includes(col.colLetter)) bgHead = 'bg-amber-800 text-amber-100 border-r border-b-2 border-b-slate-950 border-amber-700 font-extrabold';
+              else bgHead = 'bg-indigo-900 text-indigo-100 border-r border-b-2 border-b-slate-950 border-indigo-800 font-bold';
+
+              const sProps = getStickyHeaderProps(col.colLetter, { minWidth: col.minWidth || '110px' });
+
+              return (
+                <th
+                  key={col.id}
+                  ref={(el) => { headerRefs.current[col.colLetter] = el; }}
+                  style={sProps.style}
+                  className={`px-2.5 py-1.5 whitespace-nowrap ${bgHead} ${sProps.extraClass}`}
+                >
+                  <div className="flex items-center justify-between gap-1">
+                    <span className="font-semibold">{col.label}</span>
+                    {col.id === 'orderNo' ? (
+                      <span className="text-[9px] px-1 bg-amber-400 text-slate-950 rounded font-extrabold">
+                        TRIGGER 🔓
+                      </span>
+                    ) : (
+                      <span className="text-[9px] text-slate-400 font-mono" title="Read-only query column">
+                        🔒
+                      </span>
+                    )}
+                  </div>
+                </th>
+              );
+            })}
+          </tr>
+        </thead>
+
+        {/* Table Body */}
+        <tbody className="font-sans">
+          {filteredRowsCount === 0 ? (
+            <tr>
+              <td colSpan={visibleColumns.length + 1} className="text-center py-12 text-slate-500 bg-white">
+                <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                <p className="font-semibold text-slate-700">No orders match the filter or search criteria in Product Order.</p>
+                <p className="text-xs text-slate-400 mt-1">Try resetting the month/year filter, or click &quot;Sync Live Sheet&quot; to load your orders.</p>
+              </td>
+            </tr>
+          ) : (
+            paginatedRows.map((row, index) => {
+              const hasOrderNo = Boolean(row.orderNo && row.orderNo.trim() !== '');
+              const isHighlighted = highlightedOrderId === row.orderId;
+              const rowIndex = (safeCurrentPage - 1) * (pageSize || 30) + index + 1;
+
+              // 100% opaque solid background classes so scrolling cells NEVER show through frozen columns
+              const solidCellBg = isHighlighted
+                ? 'bg-amber-100'
+                : !hasOrderNo
+                  ? 'bg-[#fffbeb] group-hover:bg-[#fef3c7]'
+                  : index % 2 === 0
+                    ? 'bg-white group-hover:bg-[#f0f9ff]'
+                    : 'bg-[#f8fafc] group-hover:bg-[#f0f9ff]';
+
+              const solidHashBg = isHighlighted
+                ? 'bg-amber-200'
+                : 'bg-[#f1f5f9] group-hover:bg-[#e0f2fe]';
+
+              const hashProps = getStickyBodyCellProps('#', solidHashBg);
+
+              return (
+                <tr
+                  key={row.orderId}
+                  id={`order-row-${row.orderId}`}
+                  className={`group transition-colors ${isHighlighted ? 'font-semibold' : ''}`}
+                >
+                  {/* # Google Sheet Row Number Column */}
+                  <td
+                    style={hashProps.style}
+                    className={`w-11 px-2 py-0.5 text-center font-mono font-bold text-slate-500 border-r border-b border-slate-200 text-[11px] ${hashProps.extraClass}`}
+                    title={row.sheetRowIndex ? `Google Sheet Row #${row.sheetRowIndex}` : `Row ${rowIndex}`}
+                  >
+                    {row.sheetRowIndex || rowIndex}
+                  </td>
+
+                  {visibleColumns.map((col) => {
+                    const cellBg = col.colLetter === 'S' && !isHighlighted
+                      ? 'bg-[#ecfdf5] group-hover:bg-[#d1fae5]'
+                      : solidCellBg;
+                    const cProps = getStickyBodyCellProps(col.colLetter, cellBg);
+
+                    return (
+                      <td
+                        key={col.id}
+                        style={cProps.style}
+                        className={`px-2 py-0.5 border-r border-b border-slate-200 whitespace-nowrap ${
+                          col.colLetter === 'S' ? 'px-2.5 border-slate-300' : ''
+                        } ${cProps.extraClass}`}
+                      >
+                        {renderCellContent(col.colLetter, row, hasOrderNo)}
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+

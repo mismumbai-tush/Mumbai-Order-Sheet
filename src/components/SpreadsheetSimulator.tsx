@@ -82,6 +82,7 @@ import {
 const LOCAL_STORAGE_KEY = 'ginza_fms_query_orders_v16_locked';
 const LOCAL_STORAGE_DISPATCH_KEY = 'ginza_fms_sheet_dispatch_v16';
 const LOCAL_STORAGE_COL_VISIBILITY = 'ginza_fms_col_visibility_v11';
+const LOCAL_STORAGE_COL_VISIBILITY_BY_TAB = 'ginza_fms_col_visibility_by_tab_v1';
 const LOCAL_STORAGE_FIREBASE_CONFIG = 'ginza_fms_firebase_cfg_v9';
 const LOCAL_STORAGE_FREEZE_CONFIG = 'ginza_fms_freeze_cfg_v9';
 const LOCAL_STORAGE_CONFIRM_KEY = 'ginza_fms_confirm_msg_v9';
@@ -389,31 +390,46 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     return initialExistingDispatch;
   });
 
-  // Column Visibility state (Allows hiding/showing manual columns like Addresses, Follow-ups, etc.)
-  const [visibleCols, setVisibleCols] = useState<Record<string, boolean>>(() => {
+  // Per-Tab Column Visibility state (Independent Hide/Show for Product Order, Product Automation, and Closed Orders)
+  const buildDefaultProductOrderVisibility = (): Record<string, boolean> => {
+    const map: Record<string, boolean> = {};
+    productOrderColumns.forEach(c => { map[c.colLetter] = true; });
+    return map;
+  };
+  const buildDefaultAutomationVisibility = (): Record<string, boolean> => {
+    const map: Record<string, boolean> = {};
+    fmsColumnMapping.forEach(c => { map[c.sheetCol] = true; });
+    return map;
+  };
+  const [visibleColsByTab, setVisibleColsByTab] = useState<Record<'product_order' | 'automation' | 'closed', Record<string, boolean>>>(() => {
+    const defaultPO = buildDefaultProductOrderVisibility();
+    const defaultAuto = buildDefaultAutomationVisibility();
     try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_COL_VISIBILITY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
+      const savedByTab = localStorage.getItem(LOCAL_STORAGE_COL_VISIBILITY_BY_TAB);
+      if (savedByTab) {
+        const parsed = JSON.parse(savedByTab);
         return {
-          ...parsed,
-          AA: parsed.AA ?? true,
-          AB: parsed.AB ?? true,
-          AG: parsed.AG ?? true,
-          AH: parsed.AH ?? true,
-          AI: parsed.AI ?? true,
-          AJ: parsed.AJ ?? true,
-          AK: parsed.AK ?? true,
-          AL: parsed.AL ?? true,
+          product_order: { ...defaultPO, ...(parsed.product_order || {}) },
+          automation: { ...defaultAuto, ...(parsed.automation || {}) },
+          closed: { ...defaultAuto, ...(parsed.closed || {}) }
+        };
+      }
+      const legacySaved = localStorage.getItem(LOCAL_STORAGE_COL_VISIBILITY);
+      if (legacySaved) {
+        const parsedLegacy = JSON.parse(legacySaved);
+        const migratedAuto = { ...defaultAuto, ...parsedLegacy };
+        return {
+          product_order: defaultPO,
+          automation: migratedAuto,
+          closed: { ...defaultAuto }
         };
       }
     } catch (e) {}
-    // Default: Show all 43 active columns A to AQ from Google Sheet
-    const initial: Record<string, boolean> = {};
-    fmsColumnMapping.forEach(col => {
-      initial[col.sheetCol] = true;
-    });
-    return initial;
+    return {
+      product_order: defaultPO,
+      automation: defaultAuto,
+      closed: { ...defaultAuto }
+    };
   });
 
   // Freeze Configuration: freezeColumns (0, 1: #, 2: # + PO, 3: # + PO + Name), freezeRows (1: Header, 0: None)
@@ -428,18 +444,26 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   const [freezeRows, setFreezeRows] = useState<number>(1);
   const [showFreezeMenu, setShowFreezeMenu] = useState(false);
 
-  // Column Dropdown Filter State: Record<colLetter, string[]>
-  const [colFilters, setColFilters] = useState<Record<string, string[]>>({});
+  // Tab-scoped Column Dropdown Filter State: Record<tab, Record<colLetter, string[]>>
+  const [colFiltersByTab, setColFiltersByTab] = useState<Record<'product_order' | 'automation' | 'closed', Record<string, string[]>>>({
+    product_order: {},
+    automation: {},
+    closed: {}
+  });
 
-  // Active Sorting: { column: string; direction: 'asc' | 'desc' }
-  const [sortConfig, setSortConfig] = useState<{ column: string; direction: 'asc' | 'desc' } | null>(null);
+  // Tab-scoped Active Sorting: Record<tab, { column: string; direction: 'asc' | 'desc' } | null>
+  const [sortConfigByTab, setSortConfigByTab] = useState<Record<'product_order' | 'automation' | 'closed', { column: string; direction: 'asc' | 'desc' } | null>>({
+    product_order: null,
+    automation: null,
+    closed: null
+  });
 
   // Active popover filter menu
   const [activeFilterCol, setActiveFilterCol] = useState<string | null>(null);
 
   // Column Visibility Manager modal
   const [showColManager, setShowColManager] = useState(false);
-  const [selectedColsToHide, setSelectedColsToHide] = useState<string[]>([]);
+  const [colSearchQuery, setColSearchQuery] = useState('');
 
   // Excel / CSV / Google Sheet Import Modal
   const [showImportModal, setShowImportModal] = useState(false);
@@ -629,8 +653,45 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
   };
 
-  // Global search filter
-  const [searchTerm, setSearchTerm] = useState('');
+  // Tab-scoped search filter (each tab has its own independent search term)
+  const [searchTermsByTab, setSearchTermsByTab] = useState<Record<'product_order' | 'automation' | 'closed', string>>({
+    product_order: '',
+    automation: '',
+    closed: ''
+  });
+
+  // Derived active-tab views & updaters so every filter/column setting stays strictly within the active tab
+  const visibleCols = visibleColsByTab[activeSheetTab];
+  const setVisibleCols: React.Dispatch<React.SetStateAction<Record<string, boolean>>> = (updater) => {
+    setVisibleColsByTab(prev => {
+      const current = prev[activeSheetTab];
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      return { ...prev, [activeSheetTab]: next };
+    });
+  };
+
+  const colFilters = colFiltersByTab[activeSheetTab];
+  const setColFilters: React.Dispatch<React.SetStateAction<Record<string, string[]>>> = (updater) => {
+    setColFiltersByTab(prev => {
+      const current = prev[activeSheetTab];
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      return { ...prev, [activeSheetTab]: next };
+    });
+  };
+
+  const sortConfig = sortConfigByTab[activeSheetTab];
+  const setSortConfig: React.Dispatch<React.SetStateAction<{ column: string; direction: 'asc' | 'desc' } | null>> = (updater) => {
+    setSortConfigByTab(prev => {
+      const current = prev[activeSheetTab];
+      const next = typeof updater === 'function' ? updater(current) : updater;
+      return { ...prev, [activeSheetTab]: next };
+    });
+  };
+
+  const searchTerm = searchTermsByTab[activeSheetTab];
+  const setSearchTerm = (val: string) => {
+    setSearchTermsByTab(prev => ({ ...prev, [activeSheetTab]: val }));
+  };
 
   // Status message for simulation feedback
   const [syncFeedback, setSyncFeedback] = useState<string | null>(null);
@@ -685,9 +746,10 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
   useEffect(() => {
     try {
-      localStorage.setItem(LOCAL_STORAGE_COL_VISIBILITY, JSON.stringify(visibleCols));
+      localStorage.setItem(LOCAL_STORAGE_COL_VISIBILITY_BY_TAB, JSON.stringify(visibleColsByTab));
+      localStorage.setItem(LOCAL_STORAGE_COL_VISIBILITY, JSON.stringify(visibleColsByTab.automation));
     } catch (e) {}
-  }, [visibleCols]);
+  }, [visibleColsByTab]);
 
   useEffect(() => {
     try {
@@ -2131,8 +2193,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         if (!isOrderComplete) return; // Strictly show ONLY Col AM Complete records in Closed Orders
       }
 
-      // 2. Toolbar Status dropdown filter
-      if (statusFilter !== 'ALL') {
+      // 2. Toolbar Status dropdown filter (strictly scoped to Product Automation tab)
+      if (activeSheetTab === 'automation' && statusFilter !== 'ALL') {
         if (statusFilter === 'Closed' || statusFilter === 'Complete') {
           if (!isOrderComplete) return;
         } else if (statusFilter === 'Open') {
@@ -2314,10 +2376,13 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     });
   };
 
-  // Get unique values for ANY column to show in filter dropdown
+  // Get unique values for ANY column in the ACTIVE tab to show in filter dropdown
   const getUniqueColumnValues = (col: string): string[] => {
     const set = new Set<string>();
     groupedOrders.forEach(o => {
+      const isOrderComplete = isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN));
+      if (activeSheetTab === 'automation' && isOrderComplete) return;
+      if (activeSheetTab === 'closed' && !isOrderComplete) return;
       if (col === 'A') set.add(o.timestamp || '');
       else if (col === 'B') set.add(o.customerName || '');
       else if (col === 'C') set.add(o.orderDate || '');
@@ -2373,7 +2438,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             type="button"
             onClick={() => {
               setActiveSheetTab('product_order');
-              setStatusFilter('ALL');
+              setActiveFilterCol(null);
+              setShowColManager(false);
+              setColSearchQuery('');
             }}
             className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-2 cursor-pointer border ${
               activeSheetTab === 'product_order'
@@ -2390,7 +2457,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             type="button"
             onClick={() => {
               setActiveSheetTab('automation');
-              setStatusFilter('ALL');
+              setActiveFilterCol(null);
+              setShowColManager(false);
+              setColSearchQuery('');
               setAutomationPage(1);
             }}
             className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-2 cursor-pointer border ${
@@ -2413,7 +2482,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             type="button"
             onClick={() => {
               setActiveSheetTab('closed');
-              setStatusFilter('ALL');
+              setActiveFilterCol(null);
+              setShowColManager(false);
+              setColSearchQuery('');
               setAutomationPage(1);
             }}
             className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-2 cursor-pointer border ${
@@ -2572,14 +2643,18 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               </button>
             </div>
 
-            {/* Columns Hide / Show Button */}
+            {/* Columns Hide / Show Button (Per Active Tab) */}
             <button
               onClick={() => setShowColManager(true)}
-              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg shadow-2xs transition-colors shrink-0"
-              title="Hide / Show Specific Columns"
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold bg-white border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-lg shadow-2xs transition-colors shrink-0 cursor-pointer"
+              title="Hide / Show Specific Columns in the Active Tab"
             >
               <Columns className="w-3 h-3 text-emerald-700" />
-              <span>Columns ({Object.values(visibleCols).filter(Boolean).length}/45)</span>
+              <span>
+                {activeSheetTab === 'product_order'
+                  ? `Columns (${productOrderColumns.filter(c => visibleCols[c.colLetter] !== false).length}/${productOrderColumns.length})`
+                  : `Columns (${fmsColumnMapping.filter(c => visibleCols[c.sheetCol]).length}/${fmsColumnMapping.length})`}
+              </span>
             </button>
 
             {/* Export CSV */}
@@ -2687,6 +2762,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             orders={rawResponses}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
+            visibleCols={visibleColsByTab.product_order}
             isFullWidth={isFullWidth}
             onGenerateOrderNo={handleGenerateOrderNo}
             onGenerateAllPending={handleGenerateAllPendingOrderNo}
@@ -3487,100 +3563,200 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         </div>
       )}
 
-      {/* MODAL: COLUMN VISIBILITY MANAGER (HIDE / SHOW MANUAL COLUMNS & HIDE SELECTED) */}
-      {showColManager && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full border border-slate-200 overflow-hidden">
-            <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
-              <div>
-                <h3 className="font-bold text-sm flex items-center gap-2">
-                  <Columns className="w-4 h-4 text-emerald-400" />
-                  Customize Visible Columns (Hide / Show Manual Columns)
-                </h3>
-                <p className="text-[11px] text-slate-300">
-                  Select which columns appear in your spreadsheet grid
-                </p>
-              </div>
-              <button onClick={() => setShowColManager(false)} className="text-slate-400 hover:text-white">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+      {/* MODAL: PER-TAB COLUMN VISIBILITY MANAGER (HIDE / SHOW SPECIFIC COLUMNS) */}
+      {showColManager && (() => {
+        const isProductOrderTab = activeSheetTab === 'product_order';
+        const activeTabTitle = isProductOrderTab
+          ? 'Product Order'
+          : activeSheetTab === 'closed'
+            ? 'Closed Orders'
+            : 'Product Automation';
 
-            <div className="p-4 space-y-3 max-h-[60vh] overflow-y-auto text-xs">
-              {/* Quick toggle presets */}
-              <div className="flex flex-wrap items-center gap-2 pb-2 border-b border-slate-200">
+        const tabColumnsList = isProductOrderTab
+          ? productOrderColumns.map(c => ({ key: c.colLetter, name: c.label }))
+          : fmsColumnMapping.map(c => ({ key: c.sheetCol, name: c.name }));
+
+        const filteredColItems = tabColumnsList.filter(c => {
+          if (!colSearchQuery.trim()) return true;
+          const q = colSearchQuery.toLowerCase();
+          return c.key.toLowerCase().includes(q) || c.name.toLowerCase().includes(q);
+        });
+
+        const visibleCount = tabColumnsList.filter(c =>
+          isProductOrderTab ? visibleCols[c.key] !== false : !!visibleCols[c.key]
+        ).length;
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full border border-slate-200 overflow-hidden">
+              <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between">
+                <div>
+                  <h3 className="font-bold text-sm flex items-center gap-2">
+                    <Columns className="w-4 h-4 text-emerald-400" />
+                    <span>Hide / Show Columns — {activeTabTitle}</span>
+                  </h3>
+                  <p className="text-[11px] text-slate-300">
+                    Checked columns stay visible in <span className="font-semibold text-white">{activeTabTitle}</span>; uncheck any column to hide it.
+                  </p>
+                </div>
                 <button
                   onClick={() => {
-                    const all: Record<string, boolean> = {};
-                    fmsColumnMapping.forEach(c => all[c.sheetCol] = true);
-                    setVisibleCols(all);
+                    setShowColManager(false);
+                    setColSearchQuery('');
                   }}
-                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700"
+                  className="text-slate-400 hover:text-white cursor-pointer"
                 >
-                  Show All 45
-                </button>
-                <button
-                  onClick={() => {
-                    const focused: Record<string, boolean> = {};
-                    fmsColumnMapping.forEach(c => {
-                      focused[c.sheetCol] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AN', 'AO', 'AP'].includes(c.sheetCol);
-                    });
-                    setVisibleCols(focused);
-                  }}
-                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700"
-                >
-                  Standard FMS View (28)
-                </button>
-                <button
-                  onClick={() => {
-                    const min: Record<string, boolean> = {};
-                    fmsColumnMapping.forEach(c => {
-                      min[c.sheetCol] = ['B', 'C', 'G', 'K', 'L', 'Y', 'Z', 'AN'].includes(c.sheetCol);
-                    });
-                    setVisibleCols(min);
-                  }}
-                  className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700"
-                >
-                  Compact Dispatch (8)
+                  <X className="w-4 h-4" />
                 </button>
               </div>
 
-              {/* Grid of all columns */}
-              <div className="grid grid-cols-2 gap-1.5">
-                {fmsColumnMapping.map(col => (
-                  <label
-                    key={col.sheetCol}
-                    className={`flex items-center gap-2 p-1.5 rounded border transition-colors cursor-pointer ${
-                      visibleCols[col.sheetCol] ? 'bg-emerald-50/60 border-emerald-200 text-slate-900' : 'bg-slate-50 border-slate-200 text-slate-400'
-                    }`}
+              <div className="p-4 space-y-3 max-h-[64vh] overflow-y-auto text-xs">
+                {/* Search Columns */}
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={colSearchQuery}
+                    onChange={(e) => setColSearchQuery(e.target.value)}
+                    placeholder={`Search columns in ${activeTabTitle} (e.g. Rate, Color, S, AN)...`}
+                    className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50 border border-slate-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800"
+                  />
+                  {colSearchQuery && (
+                    <button
+                      type="button"
+                      onClick={() => setColSearchQuery('')}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Quick toggle presets per active tab */}
+                <div className="flex flex-wrap items-center gap-2 pb-2 border-b border-slate-200">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const all: Record<string, boolean> = {};
+                      tabColumnsList.forEach(c => { all[c.key] = true; });
+                      setVisibleCols(all);
+                    }}
+                    className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded font-semibold text-emerald-800 cursor-pointer"
                   >
-                    <input
-                      type="checkbox"
-                      checked={!!visibleCols[col.sheetCol]}
-                      onChange={(e) => setVisibleCols(prev => ({ ...prev, [col.sheetCol]: e.target.checked }))}
-                      className="rounded text-emerald-600 focus:ring-emerald-500"
-                    />
-                    <span className="font-mono font-bold text-[11px] w-6 text-emerald-800">{col.sheetCol}</span>
-                    <span className="truncate text-xs">{col.name}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
+                    Show All ({tabColumnsList.length})
+                  </button>
 
-            <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
-              <span className="text-[11px] text-slate-500">
-                {Object.values(visibleCols).filter(Boolean).length} of 45 columns visible
-              </span>
-              <button
-                onClick={() => setShowColManager(false)}
-                className="px-4 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-semibold hover:bg-slate-800"
-              >
-                Done
-              </button>
+                  {isProductOrderTab ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const core: Record<string, boolean> = {};
+                          tabColumnsList.forEach(c => {
+                            core[c.key] = ['A', 'B', 'C', 'E', 'I', 'Q', 'S'].includes(c.key);
+                          });
+                          setVisibleCols(core);
+                        }}
+                        className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700 cursor-pointer"
+                      >
+                        Core Order Info (7)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const compact: Record<string, boolean> = {};
+                          tabColumnsList.forEach(c => {
+                            compact[c.key] = ['A', 'B', 'E', 'I', 'S'].includes(c.key);
+                          });
+                          setVisibleCols(compact);
+                        }}
+                        className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700 cursor-pointer"
+                      >
+                        Compact SO Entry (5)
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const focused: Record<string, boolean> = {};
+                          tabColumnsList.forEach(c => {
+                            focused[c.key] = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'AN', 'AO', 'AP'].includes(c.key);
+                          });
+                          setVisibleCols(focused);
+                        }}
+                        className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700 cursor-pointer"
+                      >
+                        Standard FMS View (29)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const min: Record<string, boolean> = {};
+                          tabColumnsList.forEach(c => {
+                            min[c.key] = ['B', 'C', 'E', 'I', 'S', 'U', 'V', 'AM', 'AN'].includes(c.key);
+                          });
+                          setVisibleCols(min);
+                        }}
+                        className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 rounded font-medium text-slate-700 cursor-pointer"
+                      >
+                        Compact Dispatch (9)
+                      </button>
+                    </>
+                  )}
+                </div>
+
+                {/* Grid of all columns in active tab */}
+                <div className="grid grid-cols-2 gap-1.5">
+                  {filteredColItems.map(col => {
+                    const isChecked = isProductOrderTab
+                      ? visibleCols[col.key] !== false
+                      : !!visibleCols[col.key];
+                    return (
+                      <label
+                        key={col.key}
+                        className={`flex items-center gap-2 p-1.5 rounded border transition-colors cursor-pointer ${
+                          isChecked ? 'bg-emerald-50/60 border-emerald-200 text-slate-900' : 'bg-slate-50 border-slate-200 text-slate-400'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => setVisibleCols(prev => ({ ...prev, [col.key]: e.target.checked }))}
+                          className="rounded text-emerald-600 focus:ring-emerald-500"
+                        />
+                        <span className="font-mono font-bold text-[11px] w-6 text-emerald-800">{col.key}</span>
+                        <span className="truncate text-xs">{col.name}</span>
+                      </label>
+                    );
+                  })}
+                  {filteredColItems.length === 0 && (
+                    <div className="col-span-2 py-4 text-center text-slate-400 text-xs">
+                      No columns matching &ldquo;{colSearchQuery}&rdquo;
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between">
+                <span className="text-[11px] text-slate-600 font-medium">
+                  {visibleCount} of {tabColumnsList.length} columns visible ({activeTabTitle})
+                </span>
+                <button
+                  onClick={() => {
+                    setShowColManager(false);
+                    setColSearchQuery('');
+                  }}
+                  className="px-4 py-1.5 bg-slate-900 text-white rounded-lg text-xs font-semibold hover:bg-slate-800 cursor-pointer"
+                >
+                  Done
+                </button>
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* MODAL: FIREBASE CLOUD SYNC & HISTORICAL DATA UPLOAD */}
       {showFirebaseModal && (

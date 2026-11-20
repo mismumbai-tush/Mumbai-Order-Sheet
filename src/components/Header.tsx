@@ -169,14 +169,16 @@ export const Header: React.FC<HeaderProps> = ({
                   setActiveTab('simulator');
                   setShowSettingsMenu(false);
                 }}
-                className="flex items-center gap-2 hover:opacity-90 transition-opacity cursor-pointer"
+                className="flex items-center gap-2.5 hover:opacity-90 transition-opacity cursor-pointer"
                 title="Back to Sheet Workspace"
               >
-                <div className="w-6 h-6 rounded bg-emerald-700 flex items-center justify-center text-white font-bold shadow-2xs">
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                </div>
-                <span className="text-sm font-bold tracking-tight text-slate-900 whitespace-nowrap">
-                  GINZA FMS
+                <img
+                  src="https://www.ginzalimited.com/cdn/shop/files/Ginza_logo.jpg?v=1668509673&width=500"
+                  alt="Ginza Logo"
+                  className="h-7 w-auto object-contain rounded border border-slate-200 bg-white px-1 py-0.5 shadow-2xs shrink-0"
+                />
+                <span className="text-xs sm:text-sm font-bold tracking-tight text-slate-900 whitespace-nowrap">
+                  Ginza Mumbai Master Orders Portal
                 </span>
               </button>
               <span className="hidden xl:inline-block text-[10px] font-semibold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
