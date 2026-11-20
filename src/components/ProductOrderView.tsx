@@ -31,7 +31,8 @@ import {
   Link2,
   Loader2,
   ArrowUpDown,
-  Pin
+  Pin,
+  Bell
 } from 'lucide-react';
 
 interface ProductOrderViewProps {
@@ -58,11 +59,11 @@ interface ProductOrderViewProps {
 }
 
 // Robust helper to parse order date and timestamp into year, month, day
-export function parseOrderDateInfo(dateStr?: string, timestampStr?: string): { year?: number; month?: number; day?: number } {
-  const str = (dateStr || timestampStr || '').trim();
+const parseSingleDateStr = (raw: string, preferMDY: boolean): { year?: number; month?: number; day?: number } => {
+  const str = (raw || '').trim();
   if (!str) return {};
 
-  // 1. ISO format: YYYY-MM-DD
+  // 1. ISO format: YYYY-MM-DD (unambiguous)
   const isoMatch = str.match(/^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/);
   if (isoMatch) {
     return {
@@ -72,31 +73,40 @@ export function parseOrderDateInfo(dateStr?: string, timestampStr?: string): { y
     };
   }
 
-  // 2. DMY format: DD/MM/YYYY or DD-MM-YYYY or DD.MM.YYYY
-  const dmyMatch = str.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
-  if (dmyMatch) {
-    let yr = parseInt(dmyMatch[3], 10);
+  // 2. Slash/dash date pattern: A/B/YYYY (e.g. 11/3/2026 or 29/1/2026)
+  const slashMatch = str.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
+  if (slashMatch) {
+    const p1 = parseInt(slashMatch[1], 10);
+    const p2 = parseInt(slashMatch[2], 10);
+    let yr = parseInt(slashMatch[3], 10);
     if (yr < 100) yr += 2000;
-    return {
-      day: parseInt(dmyMatch[1], 10),
-      month: parseInt(dmyMatch[2], 10),
-      year: yr
-    };
-  }
 
-  // 3. Match any date pattern inside timestamps (e.g. 29/1/2026, 1:27:48 pm)
-  const anyMatch = str.match(/(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})/);
-  if (anyMatch) {
-    let yr = parseInt(anyMatch[3], 10);
-    if (yr < 100) yr += 2000;
-    return {
-      day: parseInt(anyMatch[1], 10),
-      month: parseInt(anyMatch[2], 10),
-      year: yr
-    };
+    if (p2 > 12 && p1 <= 12) {
+      return { month: p1, day: p2, year: yr };
+    }
+    if (p1 > 12 && p2 <= 12) {
+      return { day: p1, month: p2, year: yr };
+    }
+    return preferMDY
+      ? { month: p1, day: p2, year: yr }
+      : { day: p1, month: p2, year: yr };
   }
 
   return {};
+};
+
+export function parseOrderDateInfo(dateStr?: string, timestampStr?: string): { year?: number; month?: number; day?: number } {
+  const fromOrderDate = dateStr ? parseSingleDateStr(dateStr, false) : {};
+  if (fromOrderDate.year && fromOrderDate.month && fromOrderDate.day) {
+    return fromOrderDate;
+  }
+  // Google Sheets form timestamps are usually US M/D/YYYY HH:mm:ss
+  return timestampStr ? parseSingleDateStr(timestampStr, true) : {};
+}
+
+function toLocalMidnightDate(info: { year?: number; month?: number; day?: number }): Date | null {
+  if (!info.year || !info.month || !info.day) return null;
+  return new Date(info.year, info.month - 1, info.day, 0, 0, 0, 0);
 }
 
 export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
@@ -122,6 +132,9 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
 }) => {
   const [filterPendingOnly, setFilterPendingOnly] = useState(false);
   const [filterTodayYesterdayOnly, setFilterTodayYesterdayOnly] = useState(false);
+  const [newOrdersFilterMode, setNewOrdersFilterMode] = useState<'NONE' | 'LAST_MONTH_TODAY' | 'TODAY_YESTERDAY'>('NONE');
+  const [showNewOrdersNotif, setShowNewOrdersNotif] = useState(false);
+  const newOrdersNotifRef = useRef<HTMLDivElement | null>(null);
   const [selectedYear, setSelectedYear] = useState<string>('ALL');
   const [selectedMonth, setSelectedMonth] = useState<string>('ALL');
   const [sortOrder, setSortOrder] = useState<'newest' | 'pending' | 'sheet'>('newest');
@@ -134,6 +147,24 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
   const [showQueryMap, setShowQueryMap] = useState(false);
   const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
   const [navNotification, setNavNotification] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!showNewOrdersNotif) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (newOrdersNotifRef.current && !newOrdersNotifRef.current.contains(e.target as Node)) {
+        setShowNewOrdersNotif(false);
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowNewOrdersNotif(false);
+    };
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [showNewOrdersNotif]);
 
   // Freeze / Unfreeze columns state for Product Order (persisted in localStorage)
   type FreezeTarget = 'NONE' | '#' | 'A' | 'B' | 'C' | 'D' | 'E';
@@ -199,12 +230,31 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
     const yestD = yest.getDate();
 
     const matched = orders.filter(row => {
+      const hasBlankOrderNo = !row.orderNo || row.orderNo.trim() === '';
+
       // 1. Pending O.N filter
-      if (filterPendingOnly && row.orderNo && row.orderNo.trim() !== '') {
+      if (filterPendingOnly && !hasBlankOrderNo) {
         return false;
       }
 
       const dateInfo = parseOrderDateInfo(row.orderDate, row.timestamp);
+      const rowLocalDate = toLocalMidnightDate(dateInfo);
+
+      // 1b. New Orders Notification Box filter (Blank Col S within Last Month -> Today OR Kal/Today)
+      if (newOrdersFilterMode !== 'NONE') {
+        if (!hasBlankOrderNo) return false;
+        const isToday = dateInfo.year === todayY && dateInfo.month === todayM && dateInfo.day === todayD;
+        const isYest = dateInfo.year === yestY && dateInfo.month === yestM && dateInfo.day === yestD;
+        if (newOrdersFilterMode === 'TODAY_YESTERDAY') {
+          if (!isToday && !isYest) return false;
+        } else if (newOrdersFilterMode === 'LAST_MONTH_TODAY') {
+          const lastMonthStart = new Date(todayY, todayM - 2, todayD, 0, 0, 0, 0);
+          const todayEnd = new Date(todayY, todayM - 1, todayD, 23, 59, 59, 999);
+          if (!rowLocalDate || rowLocalDate < lastMonthStart || rowLocalDate > todayEnd) {
+            return false;
+          }
+        }
+      }
 
       // 2. Today / Yesterday filter
       if (filterTodayYesterdayOnly) {
@@ -269,7 +319,118 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
     }
 
     return matched;
-  }, [orders, filterPendingOnly, filterTodayYesterdayOnly, selectedYear, selectedMonth, searchTerm, sortOrder]);
+  }, [orders, filterPendingOnly, filterTodayYesterdayOnly, newOrdersFilterMode, selectedYear, selectedMonth, searchTerm, sortOrder]);
+
+  // Live New Orders Metrics (Counted by unique Customer Name with blank Col S Order No., Last Month -> Today)
+  const newOrdersMetrics = useMemo(() => {
+    const now = new Date();
+    const todayY = now.getFullYear();
+    const todayM = now.getMonth() + 1;
+    const todayD = now.getDate();
+
+    const yest = new Date(now);
+    yest.setDate(yest.getDate() - 1);
+    const yestY = yest.getFullYear();
+    const yestM = yest.getMonth() + 1;
+    const yestD = yest.getDate();
+
+    const lastMonthStart = new Date(todayY, todayM - 2, todayD, 0, 0, 0, 0);
+    const todayEnd = new Date(todayY, todayM - 1, todayD, 23, 59, 59, 999);
+
+    const rawBlankItems: Array<{ row: ProductOrderRow; weight: number }> = [];
+
+    interface CustomerOrderGroup {
+      customerKey: string;
+      customerName: string;
+      rows: ProductOrderRow[];
+      dayTag: 'TODAY' | 'KAL' | 'RECENT';
+      latestDateTs: number;
+      highestWeight: number;
+      totalQty: number;
+      salesPerson: string;
+      latestDateLabel: string;
+    }
+
+    const customerMap = new Map<string, CustomerOrderGroup>();
+
+    orders.forEach((row, idx) => {
+      const hasBlankOrderNo = !row.orderNo || row.orderNo.trim() === '';
+      if (!hasBlankOrderNo) return;
+
+      const info = parseOrderDateInfo(row.orderDate, row.timestamp);
+      const localDate = toLocalMidnightDate(info);
+      if (!localDate) return;
+
+      if (localDate >= lastMonthStart && localDate <= todayEnd) {
+        const weight = row.sheetRowIndex ?? idx;
+        rawBlankItems.push({ row, weight });
+
+        const isToday = info.year === todayY && info.month === todayM && info.day === todayD;
+        const isYest = info.year === yestY && info.month === yestM && info.day === yestD;
+        const rowTag: 'TODAY' | 'KAL' | 'RECENT' = isToday ? 'TODAY' : isYest ? 'KAL' : 'RECENT';
+        const dateTs = localDate.getTime();
+
+        const displayCustomer = (row.customerName || 'Unknown Customer').trim();
+        const customerKey = displayCustomer.toLowerCase();
+        const existing = customerMap.get(customerKey);
+
+        if (!existing) {
+          customerMap.set(customerKey, {
+            customerKey,
+            customerName: displayCustomer,
+            rows: [row],
+            dayTag: rowTag,
+            latestDateTs: dateTs,
+            highestWeight: weight,
+            totalQty: Number(row.qty) || 0,
+            salesPerson: row.salesPerson || '',
+            latestDateLabel: row.orderDate || row.timestamp?.split(' ')[0] || ''
+          });
+        } else {
+          existing.rows.push(row);
+          existing.totalQty += Number(row.qty) || 0;
+          if (!existing.salesPerson && row.salesPerson) {
+            existing.salesPerson = row.salesPerson;
+          }
+          // Upgrade tag priority: TODAY > KAL > RECENT
+          if (rowTag === 'TODAY' || (rowTag === 'KAL' && existing.dayTag === 'RECENT')) {
+            existing.dayTag = rowTag;
+          }
+          if (dateTs > existing.latestDateTs) {
+            existing.latestDateTs = dateTs;
+            existing.latestDateLabel = row.orderDate || row.timestamp?.split(' ')[0] || existing.latestDateLabel;
+          }
+          if (weight > existing.highestWeight) {
+            existing.highestWeight = weight;
+          }
+        }
+      }
+    });
+
+    const customerGroups = Array.from(customerMap.values()).sort((a, b) => {
+      if (b.latestDateTs !== a.latestDateTs) return b.latestDateTs - a.latestDateTs;
+      return b.highestWeight - a.highestWeight;
+    });
+
+    // Ensure each customer's rows have highest sheet row first for instant jump
+    customerGroups.forEach(g => {
+      g.rows.sort((a, b) => (b.sheetRowIndex ?? 0) - (a.sheetRowIndex ?? 0));
+    });
+
+    const todayYesterdayGroups = customerGroups.filter(
+      g => g.dayTag === 'TODAY' || g.dayTag === 'KAL'
+    );
+
+    return {
+      rawBlankItems,
+      customerGroups,
+      todayYesterdayGroups,
+      totalNewCount: customerGroups.length,
+      todayYesterdayCount: todayYesterdayGroups.length,
+      totalRowCount: rawBlankItems.length,
+      windowLabel: `${lastMonthStart.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} – Today`
+    };
+  }, [orders]);
 
   // Safe pagination calculation
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / (pageSize || 30)));
@@ -375,12 +536,212 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
     setTimeout(() => setCopiedQuery(false), 2500);
   };
 
+  const handleJumpToSingleNewOrder = (targetOrder: ProductOrderRow) => {
+    setSelectedYear('ALL');
+    setSelectedMonth('ALL');
+    setFilterPendingOnly(false);
+    setFilterTodayYesterdayOnly(false);
+    setNewOrdersFilterMode('LAST_MONTH_TODAY');
+    setSortOrder('newest');
+    setShowNewOrdersNotif(false);
+
+    const sortedBySheetRow = [...newOrdersMetrics.rawBlankItems].sort((a, b) => b.weight - a.weight);
+    const idxInFiltered = sortedBySheetRow.findIndex(item => item.row.orderId === targetOrder.orderId);
+    const targetPage = idxInFiltered >= 0 && pageSize > 0 ? Math.floor(idxInFiltered / pageSize) + 1 : 1;
+    setCurrentPage(targetPage);
+    setHighlightedOrderId(targetOrder.orderId);
+
+    setTimeout(() => {
+      const el = document.getElementById(`order-row-${targetOrder.orderId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 120);
+
+    setTimeout(() => setHighlightedOrderId(null), 6000);
+  };
+
   return (
     <div className="space-y-1.5">
       {/* Product Order Clean Action Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1 text-xs">
-        {/* Left Side: Year Filter + Month Filter + Sort */}
+        {/* Left Side: New Orders Notification Box (Before Year) + Year Filter + Month Filter + Sort */}
         <div className="flex flex-wrap items-center gap-2">
+          {/* NEW ORDERS NOTIFICATION BOX (Col S Order No Blank: Last Month -> Today + Today/Kal Indicator) */}
+          <div ref={newOrdersNotifRef} className="relative">
+            <div className="flex items-center">
+              <button
+                type="button"
+                onClick={() => setShowNewOrdersNotif(prev => !prev)}
+                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-0.5 border text-xs font-bold shadow-2xs transition-all cursor-pointer ${
+                  newOrdersFilterMode !== 'NONE'
+                    ? 'bg-amber-600 text-white border-amber-700 hover:bg-amber-700'
+                    : newOrdersMetrics.totalNewCount > 0
+                      ? 'bg-amber-50 text-amber-950 border-amber-300 hover:bg-amber-100'
+                      : 'bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100'
+                }`}
+                title="New Orders (Blank Col S Order No.) from Last Month to Today — Click to view & filter"
+              >
+                <span className="relative flex items-center justify-center">
+                  <Bell className={`w-3.5 h-3.5 ${
+                    newOrdersFilterMode !== 'NONE'
+                      ? 'text-white'
+                      : newOrdersMetrics.totalNewCount > 0
+                        ? 'text-amber-600'
+                        : 'text-emerald-600'
+                  }`} />
+                  {newOrdersMetrics.totalNewCount > 0 && newOrdersFilterMode === 'NONE' && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                  )}
+                  {newOrdersMetrics.totalNewCount > 0 && (
+                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-500" />
+                  )}
+                </span>
+
+                <span>New Orders</span>
+
+                <span
+                  className={`px-1.5 py-0.2 rounded-full font-mono text-[11px] font-extrabold ${
+                    newOrdersFilterMode !== 'NONE'
+                      ? 'bg-white text-amber-800'
+                      : newOrdersMetrics.totalNewCount > 0
+                        ? 'bg-rose-600 text-white'
+                        : 'bg-emerald-200 text-emerald-900'
+                  }`}
+                >
+                  {newOrdersMetrics.totalNewCount}
+                </span>
+              </button>
+
+              {newOrdersFilterMode !== 'NONE' && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewOrdersFilterMode('NONE');
+                    setCurrentPage(1);
+                  }}
+                  className="ml-1 p-1 rounded-md bg-rose-100 hover:bg-rose-200 text-rose-700 border border-rose-300 cursor-pointer"
+                  title="Clear New Orders filter"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+
+            {/* Notification Popover Panel */}
+            {showNewOrdersNotif && (
+              <div className="absolute left-0 top-full mt-1.5 w-[350px] sm:w-[410px] bg-white border border-slate-300 rounded-xl shadow-2xl z-50 overflow-hidden">
+                {/* Header */}
+                <div className="px-3.5 py-2.5 bg-slate-900 text-white flex items-center justify-between">
+                  <div>
+                    <div className="flex items-center gap-1.5 font-bold text-xs">
+                      <Bell className="w-3.5 h-3.5 text-amber-400" />
+                      <span>New Orders Notification (Col S Blank)</span>
+                    </div>
+                    <p className="text-[10px] text-slate-300 mt-0.5">
+                      Window: <span className="font-semibold text-amber-200">{newOrdersMetrics.windowLabel}</span> — Order No. pending
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowNewOrdersNotif(false)}
+                    className="text-slate-400 hover:text-white p-1 rounded cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                {/* Live Summary Counter + 1-Click Grid Filter */}
+                <div className="p-2.5 bg-amber-50/70 border-b border-amber-200 flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSelectedYear('ALL');
+                      setSelectedMonth('ALL');
+                      setFilterTodayYesterdayOnly(false);
+                      setNewOrdersFilterMode(prev => prev === 'LAST_MONTH_TODAY' ? 'NONE' : 'LAST_MONTH_TODAY');
+                      setSortOrder('newest');
+                      setCurrentPage(1);
+                      setShowNewOrdersNotif(false);
+                    }}
+                    className={`w-full px-3 py-1.5 rounded-lg border text-[11px] font-bold flex items-center justify-between gap-1.5 cursor-pointer transition-colors ${
+                      newOrdersFilterMode === 'LAST_MONTH_TODAY'
+                        ? 'bg-amber-600 text-white border-amber-700'
+                        : 'bg-white text-slate-800 border-amber-300 hover:bg-amber-100'
+                    }`}
+                  >
+                    <span>Last Month – Today (Filter Grid)</span>
+                    <span className={`px-2 py-0.2 rounded font-mono ${
+                      newOrdersFilterMode === 'LAST_MONTH_TODAY' ? 'bg-white text-amber-800' : 'bg-rose-100 text-rose-800'
+                    }`}>
+                      {newOrdersMetrics.totalNewCount} Customers
+                    </span>
+                  </button>
+                </div>
+
+                {/* Live List of New Blank-Order-No. Customers */}
+                <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
+                  {newOrdersMetrics.totalNewCount === 0 ? (
+                    <div className="py-8 px-4 text-center text-slate-500 text-xs">
+                      <CheckCircle2 className="w-7 h-7 text-emerald-500 mx-auto mb-1.5" />
+                      <p className="font-semibold text-slate-800">All Last Month – Today orders have Order Numbers!</p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">Koi bhi blank Col S customer pending nahi hai.</p>
+                    </div>
+                  ) : (
+                    newOrdersMetrics.customerGroups.slice(0, 60).map((group) => {
+                      const primaryRow = group.rows[0];
+                      return (
+                        <button
+                          key={group.customerKey}
+                          type="button"
+                          onClick={() => handleJumpToSingleNewOrder(primaryRow)}
+                          className="w-full text-left px-3 py-2 hover:bg-amber-50/70 transition-colors flex items-start justify-between gap-2 cursor-pointer"
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              {group.dayTag === 'TODAY' ? (
+                                <span className="px-1.5 py-0.2 rounded bg-emerald-600 text-white text-[9px] font-extrabold uppercase shrink-0">
+                                  Today
+                                </span>
+                              ) : group.dayTag === 'KAL' ? (
+                                <span className="px-1.5 py-0.2 rounded bg-sky-600 text-white text-[9px] font-extrabold uppercase shrink-0">
+                                  Kal
+                                </span>
+                              ) : (
+                                <span className="px-1.5 py-0.2 rounded bg-slate-200 text-slate-700 text-[9px] font-bold shrink-0">
+                                  {group.latestDateLabel}
+                                </span>
+                              )}
+                              <span className="font-bold text-slate-900 truncate text-xs">
+                                {group.customerName}
+                              </span>
+                            </div>
+                            <div className="text-[11px] text-slate-600 truncate mt-0.5">
+                              {group.rows.length > 1
+                                ? `${group.rows.length} Items (${primaryRow.itemName || '—'} + ${group.rows.length - 1} more)`
+                                : (primaryRow.itemName || '—')}{' '}
+                              • Total Qty: <span className="font-mono font-semibold text-slate-800">{group.totalQty.toLocaleString()}</span>
+                              {group.salesPerson ? ` • ${group.salesPerson}` : ''}
+                            </div>
+                          </div>
+                          <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-mono text-[10px] font-bold">
+                            {group.rows.length > 1 ? `${group.rows.length} Rows` : `Row #${primaryRow.sheetRowIndex || 'New'}`}
+                          </span>
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+
+                {newOrdersMetrics.totalNewCount > 60 && (
+                  <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-200 text-[10px] text-slate-500 text-center">
+                    Showing latest 60 of {newOrdersMetrics.totalNewCount} pending customers — click &quot;Last Month – Today&quot; above to view all in table.
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           {/* Year Filter Dropdown */}
           <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs">
             <Calendar className="w-3.5 h-3.5 text-slate-400" />
@@ -389,6 +750,7 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
               value={selectedYear}
               onChange={(e) => {
                 setSelectedYear(e.target.value);
+                setNewOrdersFilterMode('NONE');
                 setCurrentPage(1);
               }}
               className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
@@ -407,6 +769,7 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
               value={selectedMonth}
               onChange={(e) => {
                 setSelectedMonth(e.target.value);
+                setNewOrdersFilterMode('NONE');
                 setCurrentPage(1);
               }}
               className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
