@@ -35,10 +35,13 @@ import {
   Bell
 } from 'lucide-react';
 
+export type SearchBasisMode = 'customer_or_order' | 'customer' | 'order_no' | 'all';
+
 interface ProductOrderViewProps {
   orders: ProductOrderRow[];
   searchTerm?: string;
   setSearchTerm?: (val: string) => void;
+  searchMode?: SearchBasisMode;
   visibleCols?: Record<string, boolean>;
   isFullWidth: boolean;
   onGenerateOrderNo: (orderId: string, customNo?: string) => void;
@@ -113,6 +116,7 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
   orders,
   searchTerm,
   setSearchTerm,
+  searchMode = 'customer_or_order',
   visibleCols,
   isFullWidth,
   onGenerateOrderNo,
@@ -165,6 +169,10 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
       document.removeEventListener('keydown', handleEsc);
     };
   }, [showNewOrdersNotif]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [searchTerm, searchMode]);
 
   // Freeze / Unfreeze columns state for Product Order (persisted in localStorage)
   type FreezeTarget = 'NONE' | '#' | 'A' | 'B' | 'C' | 'D' | 'E';
@@ -277,19 +285,28 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
         }
       }
 
-      // 5. Search query
-      if (searchTerm) {
-        const q = searchTerm.toLowerCase();
-        const matchRef = (row.referenceNo || '').toLowerCase().includes(q);
+      // 5. Search query (Customer Name / Order Number basis)
+      if (searchTerm && searchTerm.trim() !== '') {
+        const q = searchTerm.trim().toLowerCase();
         const matchCust = (row.customerName || '').toLowerCase().includes(q);
-        const matchItem = (row.itemName || '').toLowerCase().includes(q);
         const matchOrderNo = (row.orderNo || '').toLowerCase().includes(q);
-        const matchSales = (row.salesPerson || '').toLowerCase().includes(q);
-        const matchContact = (row.salesPersonContact || '').toLowerCase().includes(q);
-        const matchPhone = (row.customerNumber || '').toLowerCase().includes(q);
-        const matchRemark = (row.remark || '').toLowerCase().includes(q);
-        if (!matchRef && !matchCust && !matchItem && !matchOrderNo && !matchSales && !matchContact && !matchPhone && !matchRemark) {
-          return false;
+
+        if (searchMode === 'customer') {
+          if (!matchCust) return false;
+        } else if (searchMode === 'order_no') {
+          if (!matchOrderNo) return false;
+        } else if (searchMode === 'customer_or_order') {
+          if (!matchCust && !matchOrderNo) return false;
+        } else {
+          const matchRef = (row.referenceNo || '').toLowerCase().includes(q);
+          const matchItem = (row.itemName || '').toLowerCase().includes(q);
+          const matchSales = (row.salesPerson || '').toLowerCase().includes(q);
+          const matchContact = (row.salesPersonContact || '').toLowerCase().includes(q);
+          const matchPhone = (row.customerNumber || '').toLowerCase().includes(q);
+          const matchRemark = (row.remark || '').toLowerCase().includes(q);
+          if (!matchRef && !matchCust && !matchItem && !matchOrderNo && !matchSales && !matchContact && !matchPhone && !matchRemark) {
+            return false;
+          }
         }
       }
       return true;
@@ -319,7 +336,7 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
     }
 
     return matched;
-  }, [orders, filterPendingOnly, filterTodayYesterdayOnly, newOrdersFilterMode, selectedYear, selectedMonth, searchTerm, sortOrder]);
+  }, [orders, filterPendingOnly, filterTodayYesterdayOnly, newOrdersFilterMode, selectedYear, selectedMonth, searchTerm, searchMode, sortOrder]);
 
   // Live New Orders Metrics (Counted by unique Customer Name with blank Col S Order No., Last Month -> Today)
   const newOrdersMetrics = useMemo(() => {

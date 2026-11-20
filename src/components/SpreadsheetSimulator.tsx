@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { GroupedOrder, ProductOrderRow, OrderItem } from '../types/fms';
 import { initialRawResponses, initialExistingDispatch, fmsColumnMapping, productOrderColumns } from '../data/sampleOrders';
-import { ProductOrderView } from './ProductOrderView';
+import { ProductOrderView, SearchBasisMode } from './ProductOrderView';
 import {
   saveOrdersToStorage,
   loadOrdersFromStorage,
@@ -653,11 +653,16 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
   };
 
-  // Tab-scoped search filter (each tab has its own independent search term)
+  // Tab-scoped search filter & search basis (each tab has its own independent search term & Customer/Order No mode)
   const [searchTermsByTab, setSearchTermsByTab] = useState<Record<'product_order' | 'automation' | 'closed', string>>({
     product_order: '',
     automation: '',
     closed: ''
+  });
+  const [searchModesByTab, setSearchModesByTab] = useState<Record<'product_order' | 'automation' | 'closed', SearchBasisMode>>({
+    product_order: 'customer_or_order',
+    automation: 'customer_or_order',
+    closed: 'customer_or_order'
   });
 
   // Derived active-tab views & updaters so every filter/column setting stays strictly within the active tab
@@ -691,6 +696,11 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   const searchTerm = searchTermsByTab[activeSheetTab];
   const setSearchTerm = (val: string) => {
     setSearchTermsByTab(prev => ({ ...prev, [activeSheetTab]: val }));
+  };
+
+  const searchMode = searchModesByTab[activeSheetTab];
+  const setSearchMode = (mode: SearchBasisMode) => {
+    setSearchModesByTab(prev => ({ ...prev, [activeSheetTab]: mode }));
   };
 
   // Status message for simulation feedback
@@ -2257,19 +2267,28 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         if (colKey === 'AP' && !selectedVals.includes(order.customerMailId || order.customerEmail || '')) return;
       }
 
-      // Global Search term
-      if (searchTerm) {
-        const q = searchTerm.toLowerCase();
-        const matchesPO = (order.customerPO || '').toLowerCase().includes(q);
+      // Search filter (Customer Name / Order Number basis)
+      if (searchTerm.trim()) {
+        const q = searchTerm.trim().toLowerCase();
         const matchesName = (order.customerName || '').toLowerCase().includes(q);
         const matchesOrderNo = (order.orderNo || '').toLowerCase().includes(q);
-        const matchesSales = (order.salesPerson || '').toLowerCase().includes(q);
-        const matchesTransporter = (order.transporterName || '').toLowerCase().includes(q);
-        const matchesAnyItem = relevantItems.some(
-          it => (it.itemName || '').toLowerCase().includes(q) || (it.color || '').toLowerCase().includes(q)
-        );
-        if (!matchesPO && !matchesName && !matchesOrderNo && !matchesSales && !matchesTransporter && !matchesAnyItem) {
-          return;
+
+        if (searchMode === 'customer') {
+          if (!matchesName) return;
+        } else if (searchMode === 'order_no') {
+          if (!matchesOrderNo) return;
+        } else if (searchMode === 'customer_or_order') {
+          if (!matchesName && !matchesOrderNo) return;
+        } else {
+          const matchesPO = (order.customerPO || '').toLowerCase().includes(q);
+          const matchesSales = (order.salesPerson || '').toLowerCase().includes(q);
+          const matchesTransporter = (order.transporterName || '').toLowerCase().includes(q);
+          const matchesAnyItem = relevantItems.some(
+            it => (it.itemName || '').toLowerCase().includes(q) || (it.color || '').toLowerCase().includes(q)
+          );
+          if (!matchesPO && !matchesName && !matchesOrderNo && !matchesSales && !matchesTransporter && !matchesAnyItem) {
+            return;
+          }
         }
       }
 
@@ -2306,7 +2325,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
 
     return result;
-  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, colFilters, sortConfig, acStatuses, anStatuses, colWStatuses, colXRemarks, colAEChecks, colAFTimestamps, colAGRemarks, colAHChecks, colAITimestamps, colAJRemarks, lrNumbers]);
+  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, searchMode, colFilters, sortConfig, acStatuses, anStatuses, colWStatuses, colXRemarks, colAEChecks, colAFTimestamps, colAGRemarks, colAHChecks, colAITimestamps, colAJRemarks, lrNumbers]);
 
   // Virtual Pagination for Product Automation & Closed Orders to prevent browser crash/freeze
   const [automationPage, setAutomationPage] = useState(1);
@@ -2548,24 +2567,56 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 overflow-x-auto select-none fms-sheet-scroll whitespace-nowrap">
           {/* Left Controls Group in Single Line */}
           <div className="flex items-center gap-2 shrink-0">
-            {/* Search Box */}
-            <div className="relative w-48 sm:w-56 shrink-0">
-              <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Search PO, Customer, Item, Order No..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-7 pr-6 py-1 text-xs bg-white border border-slate-300 rounded-md focus:outline-none focus:ring-1 focus:ring-emerald-500 text-slate-800 placeholder-slate-400"
-              />
-              {searchTerm && (
-                <button
-                  onClick={() => setSearchTerm('')}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              )}
+            {/* Search Box with Customer Name / Order Number Basis Selector (All Tabs) */}
+            <div className="flex items-center bg-white border border-slate-300 rounded-md focus-within:ring-1 focus-within:ring-emerald-500 overflow-hidden shrink-0">
+              <select
+                value={searchMode}
+                onChange={(e) => {
+                  setSearchMode(e.target.value as SearchBasisMode);
+                  setAutomationPage(1);
+                }}
+                className="bg-slate-100 border-r border-slate-300 px-2 py-1 text-[11px] font-bold text-slate-800 focus:outline-none cursor-pointer"
+                title="Choose Search Basis for this tab"
+              >
+                <option value="customer_or_order">Customer / Order No</option>
+                <option value="customer">Customer Name</option>
+                <option value="order_no">Order Number</option>
+                <option value="all">All Columns</option>
+              </select>
+              <div className="relative w-44 sm:w-56">
+                <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
+                <input
+                  type="text"
+                  placeholder={
+                    searchMode === 'customer'
+                      ? 'Search Customer Name...'
+                      : searchMode === 'order_no'
+                        ? 'Search Order Number...'
+                        : searchMode === 'customer_or_order'
+                          ? 'Search Customer / Order No...'
+                          : 'Search Customer, Order No, Item...'
+                  }
+                  value={searchTerm}
+                  onChange={(e) => {
+                    setSearchTerm(e.target.value);
+                    setAutomationPage(1);
+                  }}
+                  className="w-full pl-7 pr-6 py-1 text-xs bg-transparent focus:outline-none text-slate-800 placeholder-slate-400"
+                />
+                {searchTerm && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchTerm('');
+                      setAutomationPage(1);
+                    }}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+                    title="Clear search"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* Quick Status Filter (Contextual for Automation / Closed) */}
@@ -2762,6 +2813,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             orders={rawResponses}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
+            searchMode={searchModesByTab.product_order}
             visibleCols={visibleColsByTab.product_order}
             isFullWidth={isFullWidth}
             onGenerateOrderNo={handleGenerateOrderNo}
