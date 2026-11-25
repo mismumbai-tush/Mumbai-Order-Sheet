@@ -10,6 +10,7 @@ import {
   ProductOrderFreezeTarget,
   NewOrdersFilterMode
 } from './ProductOrderView';
+import { DashboardView } from './DashboardView';
 import {
   saveOrdersToStorage,
   loadOrdersFromStorage,
@@ -87,7 +88,8 @@ import {
   RefreshCw,
   Radio,
   Bell,
-  Calendar
+  Calendar,
+  BarChart3
 } from 'lucide-react';
 
 const LOCAL_STORAGE_KEY = 'ginza_fms_query_orders_v16_locked';
@@ -856,8 +858,10 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   const [ledgerFirebaseStatus, setLedgerFirebaseStatus] = useState<'idle' | 'synced' | 'local_only' | 'error'>('idle');
   const [ledgerStatusNote, setLedgerStatusNote] = useState<string>('');
 
-  // Active Sheet tab: 'product_order' (28-Col Raw Flat Sheet), 'automation' (Product Automation: Active Orders), 'closed' (Closed Orders Archive)
-  const [activeSheetTab, setActiveSheetTab] = useState<'product_order' | 'automation' | 'closed'>('product_order');
+  // Active Sheet tab: 'product_order' (28-Col Raw Flat Sheet), 'automation' (Product Automation: Active Orders), 'closed' (Closed Orders Archive), 'dashboard' (Executive Analytics)
+  const [activeSheetTab, setActiveSheetTab] = useState<'product_order' | 'automation' | 'closed' | 'dashboard'>('product_order');
+  const activeTableTab: 'product_order' | 'automation' | 'closed' =
+    activeSheetTab === 'dashboard' ? 'automation' : activeSheetTab;
 
   // Status Filter in Toolbar
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'Open' | 'In-Progress' | 'Closed' | 'Complete'>('ALL');
@@ -906,41 +910,41 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   });
 
   // Derived active-tab views & updaters so every filter/column setting stays strictly within the active tab
-  const visibleCols = visibleColsByTab[activeSheetTab];
+  const visibleCols = visibleColsByTab[activeTableTab];
   const setVisibleCols: React.Dispatch<React.SetStateAction<Record<string, boolean>>> = (updater) => {
     setVisibleColsByTab(prev => {
-      const current = prev[activeSheetTab];
+      const current = prev[activeTableTab];
       const next = typeof updater === 'function' ? updater(current) : updater;
-      return { ...prev, [activeSheetTab]: next };
+      return { ...prev, [activeTableTab]: next };
     });
   };
 
-  const colFilters = colFiltersByTab[activeSheetTab];
+  const colFilters = colFiltersByTab[activeTableTab];
   const setColFilters: React.Dispatch<React.SetStateAction<Record<string, string[]>>> = (updater) => {
     setColFiltersByTab(prev => {
-      const current = prev[activeSheetTab];
+      const current = prev[activeTableTab];
       const next = typeof updater === 'function' ? updater(current) : updater;
-      return { ...prev, [activeSheetTab]: next };
+      return { ...prev, [activeTableTab]: next };
     });
   };
 
-  const sortConfig = sortConfigByTab[activeSheetTab];
+  const sortConfig = sortConfigByTab[activeTableTab];
   const setSortConfig: React.Dispatch<React.SetStateAction<{ column: string; direction: 'asc' | 'desc' } | null>> = (updater) => {
     setSortConfigByTab(prev => {
-      const current = prev[activeSheetTab];
+      const current = prev[activeTableTab];
       const next = typeof updater === 'function' ? updater(current) : updater;
-      return { ...prev, [activeSheetTab]: next };
+      return { ...prev, [activeTableTab]: next };
     });
   };
 
-  const searchTerm = searchTermsByTab[activeSheetTab];
+  const searchTerm = searchTermsByTab[activeTableTab];
   const setSearchTerm = (val: string) => {
-    setSearchTermsByTab(prev => ({ ...prev, [activeSheetTab]: val }));
+    setSearchTermsByTab(prev => ({ ...prev, [activeTableTab]: val }));
   };
 
-  const searchMode = searchModesByTab[activeSheetTab];
+  const searchMode = searchModesByTab[activeTableTab];
   const setSearchMode = (mode: SearchBasisMode) => {
-    setSearchModesByTab(prev => ({ ...prev, [activeSheetTab]: mode }));
+    setSearchModesByTab(prev => ({ ...prev, [activeTableTab]: mode }));
   };
 
   // Status message for simulation feedback
@@ -3532,6 +3536,25 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               {closedOrdersCount.toLocaleString()}
             </span>
           </button>
+
+          {/* Tab 4: Dashboard (Executive Analytics across Product Automation & Closed Orders) */}
+          <button
+            type="button"
+            onClick={() => {
+              setActiveSheetTab('dashboard');
+              setActiveFilterCol(null);
+              setShowColManager(false);
+              setColSearchQuery('');
+            }}
+            className={`px-3 py-1.5 text-xs font-bold rounded-lg transition-all flex items-center gap-2 cursor-pointer border ${
+              activeSheetTab === 'dashboard'
+                ? 'bg-slate-900 text-white border-slate-950 shadow-sm'
+                : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+            }`}
+          >
+            <BarChart3 className={`w-3.5 h-3.5 ${activeSheetTab === 'dashboard' ? 'text-sky-300' : 'text-sky-600'}`} />
+            <span>Dashboard</span>
+          </button>
         </div>
 
         {/* Right Side: New Orders Notification (before Live Sheet Connected) + Live Sync Controls */}
@@ -3760,7 +3783,21 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         })()}
       </div>
 
-      {/* SPREADSHEET TOOLBAR & CONTROLS */}
+      {/* MAIN TAB VIEW: DASHBOARD OR SPREADSHEET */}
+      {activeSheetTab === 'dashboard' ? (
+        <DashboardView
+          groupedOrders={groupedOrders}
+          colAKTransporters={colAKTransporters}
+          dispatchHistoryMap={dispatchHistoryMap}
+          onNavigateToOrder={(tab, query, mode = 'customer_or_order') => {
+            setSearchTermsByTab(prev => ({ ...prev, [tab]: query }));
+            setSearchModesByTab(prev => ({ ...prev, [tab]: mode }));
+            setStatusFilter('ALL');
+            setAutomationPage(1);
+            setActiveSheetTab(tab);
+          }}
+        />
+      ) : (
       <div className="bg-white rounded-xl border border-slate-300 shadow-xs overflow-hidden">
         {/* Row 2 Control Bar - ALL IN ONE SINGLE LINE WITH VISIBLE HORIZONTAL SCROLL */}
         <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 overflow-x-auto select-none fms-sheet-scroll whitespace-nowrap">
@@ -4539,6 +4576,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         )}
 
       </div>
+      )}
 
       {/* MODAL: DIRECT GOOGLE SHEET (ID + TAB) & EXCEL / CSV DATA IMPORT */}
       {showImportModal && (
