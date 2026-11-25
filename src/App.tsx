@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Header } from './components/Header';
 import { SpreadsheetSimulator } from './components/SpreadsheetSimulator';
+import { FlyingBirdsOverlay } from './components/FlyingBirdsOverlay';
 import { QueryStudio } from './components/QueryStudio';
 import { CodeViewer } from './components/CodeViewer';
 import { FirebaseSyncHub } from './components/FirebaseSyncHub';
@@ -26,6 +27,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
+      {/* Ambient Flying Birds Overlay across all tabs (every 1-2 min: Left->Right then Right->Left) */}
+      <FlyingBirdsOverlay />
+
       {/* Top Header with Live Connected Google IDs Bar & Full-Size Controls */}
       <Header
         activeTab={activeTab}
