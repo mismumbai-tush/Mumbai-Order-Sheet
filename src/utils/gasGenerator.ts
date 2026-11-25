@@ -3090,12 +3090,38 @@ function doPost(e) {
       if (salesPersonEmail) ccEmails.push(salesPersonEmail);
       ccEmails.push("vishal.ambhore@ginzalimited.com");
 
+      var desiredFrom = "crm.mumbai@ginzalimited.com";
+      var canSendAsCrm = false;
       try {
-        GmailApp.sendEmail(email, subject, "", {
-          htmlBody: body,
-          cc: ccEmails.join(","),
-          from: "crm.mumbai@ginzalimited.com"
-        });
+        var activeEmail = String(Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail() || "").toLowerCase();
+        if (activeEmail === desiredFrom) {
+          canSendAsCrm = true;
+        } else {
+          var aliases = GmailApp.getAliases() || [];
+          for (var aIdx = 0; aIdx < aliases.length; aIdx++) {
+            if (String(aliases[aIdx] || "").toLowerCase() === desiredFrom) {
+              canSendAsCrm = true;
+              break;
+            }
+          }
+        }
+      } catch (aliasErr) {
+        canSendAsCrm = false;
+      }
+
+      var mailOptions = {
+        htmlBody: body,
+        cc: ccEmails.join(","),
+        name: "Ginza Industries Limited"
+      };
+      if (canSendAsCrm) {
+        mailOptions.from = desiredFrom;
+      } else {
+        mailOptions.replyTo = desiredFrom;
+      }
+
+      try {
+        GmailApp.sendEmail(email, subject, "", mailOptions);
         if (targetRow > 1) {
           paSheet.getRange(targetRow, 27).setValue("Sent");
           paSheet.getRange(targetRow, 28).setValue("Sent Successfully");
@@ -3264,6 +3290,21 @@ function doPost(e) {
       paSheet.getRange(targetRow, 20).setValue(String(payload.email || "").trim());
       SpreadsheetApp.flush();
       return jsonReply_(true, "Customer Mail Id saved to Col T in Row #" + targetRow);
+    }
+
+    if (action === "updateTransportName") {
+      var paSheet = ss.getSheetByName(PA_SHEET_NAME);
+      if (!paSheet) return jsonReply_(false, "Sheet not found: " + PA_SHEET_NAME);
+
+      var targetRow = findMatchingRow_(paSheet, payload.sheetRowIndex, payload.timestamp, payload.customerName, payload.itemName, payload.orderNo, payload.orderDate);
+      if (targetRow <= 1) {
+        return jsonReply_(false, "Matching row not found in " + PA_SHEET_NAME);
+      }
+
+      // Col AK (37) = Transport Name
+      paSheet.getRange(targetRow, 37).setValue(String(payload.transporterName || "").trim());
+      SpreadsheetApp.flush();
+      return jsonReply_(true, "Transport Name saved to Col AK in Row #" + targetRow);
     }
 
     return jsonReply_(false, "Unknown action: " + action);

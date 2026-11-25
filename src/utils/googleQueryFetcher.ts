@@ -373,8 +373,11 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
       const followUp2 = followUp2Raw === 'true' || followUp2Raw === '✓' || followUp2Raw === 'yes';
       const followUp2Timestamp = (r[34] || '').trim();   // Col AI
       const followUp2Remark = (r[35] || '').trim();      // Col AJ
-      const transporterName = (r[36] || '').trim();      // Col AK
-      const lrNumber = (r[37] || '').trim();             // Col AL
+      const transportIdx = header.findIndex(h => h.includes('transport'));
+      const rawTransporter = (r[36] || (transportIdx >= 0 ? r[transportIdx] : '') || '').replace(/\u00A0/g, ' ').trim();
+      const transporterName = rawTransporter;      // Col AK
+      const lrIdx = header.findIndex(h => h.includes('lr') && (h.includes('no') || h.includes('num')));
+      const lrNumber = (r[37] || (lrIdx >= 0 ? r[lrIdx] : '') || '').replace(/\u00A0/g, ' ').trim();             // Col AL
 
       // STRICT COL AM (index 38): "Open / Close" -> Complete vs Open
       const colAM = (r[38] || '').trim().toLowerCase();
@@ -682,7 +685,7 @@ export async function fetchLiveGoogleQueryData(
 }
 
 export interface SheetWritePayload {
-  action: 'updateOrderNo' | 'updateDispatchQty' | 'updateStatusAM' | 'addOrderRow' | 'sendConfirmationMail' | 'createDeliveryDraft' | 'updateCustomerEmail';
+  action: 'updateOrderNo' | 'updateDispatchQty' | 'updateStatusAM' | 'addOrderRow' | 'sendConfirmationMail' | 'createDeliveryDraft' | 'updateCustomerEmail' | 'updateTransportName';
   sheetRowIndex?: number;
   timestamp?: string;
   orderDate?: string;

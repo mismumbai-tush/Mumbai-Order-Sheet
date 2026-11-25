@@ -68,6 +68,10 @@ export const FirebaseSyncHub: React.FC = () => {
       ".write": "auth != null",
       ".indexOn": ["status", "customer_po", "customer_name", "order_no"]
     },
+    "dispatch_history": {
+      ".read": "auth != null",
+      ".write": "auth != null"
+    },
     "_connection_test": {
       ".read": true,
       ".write": true

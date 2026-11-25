@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { GroupedOrder, ProductOrderRow, OrderItem } from '../types/fms';
+import { GroupedOrder, ProductOrderRow, OrderItem, DispatchHistoryEntry } from '../types/fms';
 import { initialRawResponses, initialExistingDispatch, fmsColumnMapping, productOrderColumns } from '../data/sampleOrders';
 import { ProductOrderView, SearchBasisMode } from './ProductOrderView';
 import {
@@ -102,6 +102,71 @@ const LOCAL_STORAGE_COL_AB_KEY = 'ginza_fms_col_ab_mail_status_v1';
 const LOCAL_STORAGE_COL_AP_KEY = 'ginza_fms_col_ap_delivery_mail_v1';
 const LOCAL_STORAGE_COL_AQ_KEY = 'ginza_fms_col_aq_delivery_status_v1';
 const LOCAL_STORAGE_COL_T_KEY = 'ginza_fms_col_t_emails_v1';
+const LOCAL_STORAGE_COL_AK_KEY = 'ginza_fms_col_ak_transporters_v1';
+const LOCAL_STORAGE_DISPATCH_HISTORY_KEY = 'ginza_fms_dispatch_history_v1';
+
+const buildItemDispatchKey = (
+  orderKey: string,
+  item: { itemName?: string; color?: string; width?: string }
+): string => `${orderKey}___${(item.itemName || '').trim()}___${(item.color || '').trim()}___${(item.width || '').trim()}`;
+
+const toFirebaseSafeKey = (raw: string): string =>
+  raw.trim().replace(/[.#$/\[\]\s]+/g, '_').replace(/_+/g, '_').slice(0, 140) || 'item_unknown';
+
+const getTodayIsoDate = (): string => {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+const formatDateToIsoSafe = (raw?: string): string => {
+  if (!raw) return getTodayIsoDate();
+  const s = raw.trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const slashMatch = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/);
+  if (slashMatch) {
+    const p1 = Number(slashMatch[1]);
+    const p2 = Number(slashMatch[2]);
+    let yr = Number(slashMatch[3]);
+    if (yr < 100) yr += 2000;
+    // Detect dd/mm/yyyy vs mm/dd/yyyy
+    const day = p1 > 12 ? p1 : p2 > 12 ? p2 : p1;
+    const month = p1 > 12 ? p2 : p2 > 12 ? p1 : p2;
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      return `${yr}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime())) {
+    const y = parsed.getFullYear();
+    const m = String(parsed.getMonth() + 1).padStart(2, '0');
+    const d = String(parsed.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return getTodayIsoDate();
+};
+
+const recalculateDispatchEntries = (
+  entries: DispatchHistoryEntry[],
+  totalOrderQty: number
+): DispatchHistoryEntry[] => {
+  let runningTotal = 0;
+  return entries.map((entry, idx) => {
+    const qtyVal = Number(entry.dispatchQty) || 0;
+    runningTotal = Number((runningTotal + qtyVal).toFixed(4));
+    const runningBal = Number((totalOrderQty - runningTotal).toFixed(4));
+    return {
+      ...entry,
+      entryNo: idx + 1,
+      totalOrderQty,
+      dispatchQty: qtyVal,
+      runningTotalDispatched: runningTotal,
+      runningBalance: runningBal
+    };
+  });
+};
 
 // Helper: Check if an item/order is Completed (Closed) in Col AM
 export const isItemComplete = (status?: string): boolean => {
@@ -195,6 +260,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     const nextAP: Record<string, string> = {};
     const nextAQ: Record<string, string> = {};
     const nextT: Record<string, string> = {};
+    const nextAK: Record<string, string> = {};
     const nextDispatch: Record<string, number> = {};
 
     rows.forEach(row => {
@@ -215,6 +281,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       if (row.deliveryEmail) nextAP[gk] = row.deliveryEmail;
       if (row.deliveryEmailStatus) nextAQ[gk] = row.deliveryEmailStatus;
       if (row.customerMailId || row.customerEmail) nextT[gk] = (row.customerMailId || row.customerEmail || '').trim();
+      if (row.transporterName) nextAK[gk] = row.transporterName.trim();
 
       const itemKey = `${gk}___${(row.itemName || '').trim()}___${(row.color || '').trim()}___${(row.width || '').trim()}`;
       if (row.dispatchQty !== undefined && row.dispatchQty > 0) {
@@ -239,6 +306,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       if (Object.keys(nextAP).length > 0) setColAPStatuses(prev => ({ ...prev, ...nextAP }));
       if (Object.keys(nextAQ).length > 0) setColAQStatuses(prev => ({ ...prev, ...nextAQ }));
       if (Object.keys(nextT).length > 0) setColTEmails(prev => ({ ...prev, ...nextT }));
+      if (Object.keys(nextAK).length > 0) setColAKTransporters(prev => ({ ...prev, ...nextAK }));
       setDispatchRecords(prev => ({ ...prev, ...nextDispatch }));
     }
   };
@@ -341,8 +409,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       }
     });
 
-    // Auto-fetch live Google Sheet ("Product Order" + "Product Automation") immediately
+    // Auto-fetch live Google Sheet ("Product Order" + "Product Automation") + Firebase /dispatch_history immediately
     handleSyncBothLiveSheets(true);
+    fetchDispatchHistoryFromFirebase();
   }, []);
 
   // Periodic background centralization sync every 60s
@@ -687,6 +756,35 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   });
   const colALRemarks = colAJRemarks;
 
+  // Col AK: Transport Name (Editable inline & inside WhatsApp Dispatch modal)
+  const [colAKTransporters, setColAKTransporters] = useState<Record<string, string>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_COL_AK_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+
+  // Col U Part-Dispatch Ledger History (persisted in localStorage + Firebase Cloud /dispatch_history)
+  const [dispatchHistoryMap, setDispatchHistoryMap] = useState<Record<string, DispatchHistoryEntry[]>>(() => {
+    try {
+      const saved = localStorage.getItem(LOCAL_STORAGE_DISPATCH_HISTORY_KEY);
+      if (saved) return JSON.parse(saved);
+    } catch (e) {}
+    return {};
+  });
+  const [ledgerModalTarget, setLedgerModalTarget] = useState<{
+    order: GroupedOrder;
+    item: OrderItem;
+    itemKey: string;
+  } | null>(null);
+  const [ledgerDispatchDate, setLedgerDispatchDate] = useState<string>(() => getTodayIsoDate());
+  const [ledgerDispatchQty, setLedgerDispatchQty] = useState<string>('');
+  const [ledgerNote, setLedgerNote] = useState<string>('');
+  const [isSavingLedger, setIsSavingLedger] = useState<boolean>(false);
+  const [ledgerFirebaseStatus, setLedgerFirebaseStatus] = useState<'idle' | 'synced' | 'local_only' | 'error'>('idle');
+  const [ledgerStatusNote, setLedgerStatusNote] = useState<string>('');
+
   // Active Sheet tab: 'product_order' (28-Col Raw Flat Sheet), 'automation' (Product Automation: Active Orders), 'closed' (Closed Orders Archive)
   const [activeSheetTab, setActiveSheetTab] = useState<'product_order' | 'automation' | 'closed'>('product_order');
 
@@ -941,6 +1039,12 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         if (!map[orderKey].deliveryEmailStatus && row.deliveryEmailStatus) {
           map[orderKey].deliveryEmailStatus = row.deliveryEmailStatus;
         }
+        if (!map[orderKey].transporterName && row.transporterName) {
+          map[orderKey].transporterName = row.transporterName;
+        }
+        if (!map[orderKey].lrNumber && row.lrNumber) {
+          map[orderKey].lrNumber = row.lrNumber;
+        }
         if (!map[orderKey].sheetRowIndex && row.sheetRowIndex) {
           map[orderKey].sheetRowIndex = row.sheetRowIndex;
         }
@@ -952,8 +1056,13 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         }
       }
 
-      const itemKey = `${orderKey}___${(row.itemName || '').trim()}___${(row.color || '').trim()}___${(row.width || '').trim()}`;
-      const dispatch = dispatchRecords[itemKey] !== undefined ? dispatchRecords[itemKey] : (Number(row.dispatchQty) || 0);
+      const itemKey = buildItemDispatchKey(orderKey, row);
+      const ledgerEntries = dispatchHistoryMap[itemKey];
+      const dispatch = (ledgerEntries && ledgerEntries.length > 0)
+        ? Number(ledgerEntries.reduce((s, e) => s + (Number(e.dispatchQty) || 0), 0).toFixed(4))
+        : dispatchRecords[itemKey] !== undefined
+        ? dispatchRecords[itemKey]
+        : (Number(row.dispatchQty) || 0);
       const balance = Number((row.qty - dispatch).toFixed(4));
 
       map[orderKey].items.push({
@@ -975,7 +1084,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
     // Show newest Google Sheet orders on Page 1 first
     return Object.values(map).sort((a, b) => (b._maxRow ?? 0) - (a._maxRow ?? 0));
-  }, [automationRows, rawResponses, dispatchRecords]);
+  }, [automationRows, rawResponses, dispatchRecords, dispatchHistoryMap]);
 
   // Handle Status AM Dropdown Change: 'Open' | 'In-Progress' | 'Complete'
   const handleItemStatusChange = async (orderId: string, newStatus: 'Open' | 'In-Progress' | 'Closed' | 'Complete') => {
@@ -1034,7 +1143,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   // Handle changing Dispatch Qty in Col U
   const handleDispatchChange = (orderKey: string, item: { id?: string; itemName: string; color: string; width: string }, newQtyStr: string) => {
     const val = newQtyStr === '' ? 0 : (Number(newQtyStr) || 0);
-    const itemKey = `${orderKey}___${item.itemName.trim()}___${item.color.trim()}___${item.width.trim()}`;
+    const itemKey = buildItemDispatchKey(orderKey, item);
 
     setDispatchRecords(prev => ({
       ...prev,
@@ -1043,7 +1152,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
     setAutomationRows(prev =>
       prev.map(r => {
-        if (r.orderId === item.id || buildOrderGroupKey(r) === orderKey && r.itemName.trim() === item.itemName.trim()) {
+        if (r.orderId === item.id || (buildOrderGroupKey(r) === orderKey && r.itemName.trim() === item.itemName.trim())) {
           return {
             ...r,
             dispatchQty: val,
@@ -1073,6 +1182,274 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         }, 900);
       }
     }
+  };
+
+  // Fetch all /dispatch_history entries from Firebase Realtime Database
+  const fetchDispatchHistoryFromFirebase = async () => {
+    const targetUrl = (firebaseUrl || '').trim().replace(/\/+$/, '');
+    if (!targetUrl) return;
+    const authParam = firebaseSecret ? `?auth=${encodeURIComponent(firebaseSecret.trim())}` : '';
+    try {
+      const resp = await fetch(`${targetUrl}/dispatch_history.json${authParam}`, { cache: 'no-store' });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (!data || typeof data !== 'object') return;
+
+      const remoteMap: Record<string, DispatchHistoryEntry[]> = {};
+      const remoteSums: Record<string, number> = {};
+
+      Object.values(data as Record<string, any>).forEach(node => {
+        if (node && typeof node === 'object' && node.itemKey && Array.isArray(node.entries) && node.entries.length > 0) {
+          const cleanEntries = recalculateDispatchEntries(node.entries, Number(node.totalQty) || Number(node.entries[0]?.totalOrderQty) || 0);
+          remoteMap[node.itemKey] = cleanEntries;
+          remoteSums[node.itemKey] = Number(cleanEntries.reduce((s, e) => s + (Number(e.dispatchQty) || 0), 0).toFixed(4));
+        }
+      });
+
+      if (Object.keys(remoteMap).length > 0) {
+        setDispatchHistoryMap(prev => {
+          const merged = { ...prev, ...remoteMap };
+          try { localStorage.setItem(LOCAL_STORAGE_DISPATCH_HISTORY_KEY, JSON.stringify(merged)); } catch {}
+          return merged;
+        });
+        setDispatchRecords(prev => {
+          const merged = { ...prev, ...remoteSums };
+          try { localStorage.setItem(LOCAL_STORAGE_DISPATCH_KEY, JSON.stringify(merged)); } catch {}
+          return merged;
+        });
+      }
+    } catch (err) {
+      console.warn('Firebase /dispatch_history sync read skipped:', err);
+    }
+  };
+
+  // Persist item ledger entries to Firebase Realtime Database (/dispatch_history/<safeKey>)
+  const syncItemLedgerToFirebase = async (
+    itemKey: string,
+    order: GroupedOrder,
+    item: OrderItem,
+    entries: DispatchHistoryEntry[]
+  ): Promise<{ ok: boolean; reason?: string }> => {
+    const targetUrl = (firebaseUrl || '').trim().replace(/\/+$/, '');
+    if (!targetUrl) return { ok: false, reason: 'Firebase URL missing' };
+    const authParam = firebaseSecret ? `?auth=${encodeURIComponent(firebaseSecret.trim())}` : '';
+    const safeKey = toFirebaseSafeKey(itemKey);
+    const endpoint = `${targetUrl}/dispatch_history/${safeKey}.json${authParam}`;
+
+    try {
+      if (entries.length === 0) {
+        const delResp = await fetch(endpoint, { method: 'DELETE' });
+        return delResp.ok ? { ok: true } : { ok: false, reason: `HTTP ${delResp.status}` };
+      }
+
+      const totalDispatched = Number(entries.reduce((s, e) => s + (Number(e.dispatchQty) || 0), 0).toFixed(4));
+      const balanceQty = Number((item.qty - totalDispatched).toFixed(4));
+      const payload = {
+        itemKey,
+        orderKey: order.orderKey,
+        orderNo: order.orderNo || '',
+        customerName: order.customerName || '',
+        itemName: item.itemName || '',
+        color: item.color || '',
+        width: item.width || '',
+        unitOfItem: item.unitOfItem || '',
+        totalQty: item.qty,
+        totalDispatched,
+        balanceQty,
+        updatedAt: new Date().toISOString(),
+        entries
+      };
+
+      const resp = await fetch(endpoint, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!resp.ok) {
+        return { ok: false, reason: `Firebase HTTP ${resp.status}` };
+      }
+      return { ok: true };
+    } catch (err: any) {
+      return { ok: false, reason: err?.message || 'Network error' };
+    }
+  };
+
+  // Open Part Dispatch Ledger Box for a specific product item row
+  const handleOpenPartDispatchLedger = (order: GroupedOrder, item: OrderItem) => {
+    const itemKey = buildItemDispatchKey(order.orderKey, item);
+    setLedgerDispatchDate(getTodayIsoDate());
+    setLedgerDispatchQty('');
+    setLedgerNote('');
+    setLedgerFirebaseStatus('idle');
+    setLedgerStatusNote('');
+    setLedgerModalTarget({ order, item, itemKey });
+  };
+
+  // Commit updated ledger entries to state, localStorage, Firebase /dispatch_history, and Google Sheet Col U
+  const commitLedgerEntries = async (
+    order: GroupedOrder,
+    item: OrderItem,
+    itemKey: string,
+    recalculated: DispatchHistoryEntry[],
+    feedbackPrefix: string
+  ) => {
+    const newTotalDispatched = Number(recalculated.reduce((s, e) => s + (Number(e.dispatchQty) || 0), 0).toFixed(4));
+    const newBalance = Number((item.qty - newTotalDispatched).toFixed(4));
+
+    setDispatchHistoryMap(prev => {
+      const next = { ...prev };
+      if (recalculated.length === 0) {
+        delete next[itemKey];
+      } else {
+        next[itemKey] = recalculated;
+      }
+      try { localStorage.setItem(LOCAL_STORAGE_DISPATCH_HISTORY_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+
+    setDispatchRecords(prev => {
+      const next = { ...prev, [itemKey]: newTotalDispatched };
+      try { localStorage.setItem(LOCAL_STORAGE_DISPATCH_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+
+    setAutomationRows(prev =>
+      prev.map(r => {
+        if (r.orderId === item.id || (buildOrderGroupKey(r) === order.orderKey && r.itemName.trim() === item.itemName.trim() && (r.color || '').trim() === (item.color || '').trim())) {
+          return {
+            ...r,
+            dispatchQty: newTotalDispatched,
+            balanceQty: newBalance
+          };
+        }
+        return r;
+      })
+    );
+
+    setRawResponses(prev =>
+      prev.map(r => {
+        if (r.orderId === item.id || (buildOrderGroupKey(r) === order.orderKey && r.itemName.trim() === item.itemName.trim() && (r.color || '').trim() === (item.color || '').trim())) {
+          return {
+            ...r,
+            dispatchQty: newTotalDispatched,
+            balanceQty: newBalance
+          };
+        }
+        return r;
+      })
+    );
+
+    setLedgerModalTarget(prev =>
+      prev && prev.itemKey === itemKey
+        ? {
+            ...prev,
+            item: {
+              ...prev.item,
+              dispatchQty: newTotalDispatched,
+              balanceQty: newBalance
+            }
+          }
+        : prev
+    );
+
+    setIsSavingLedger(true);
+    const fbRes = await syncItemLedgerToFirebase(itemKey, order, item, recalculated);
+
+    let sheetMsg = '';
+    if (webAppUrl && webAppUrl.trim().startsWith('https://script.google.com/')) {
+      const targetRow = automationRowsRef.current.find(r => r.orderId === item.id || buildOrderGroupKey(r) === order.orderKey);
+      const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
+        action: 'updateDispatchQty',
+        sheetRowIndex: targetRow?.sheetRowIndex || order.sheetRowIndex,
+        timestamp: targetRow?.timestamp || order.timestamp,
+        customerName: order.customerName,
+        itemName: item.itemName,
+        orderNo: order.orderNo,
+        dispatchQty: newTotalDispatched
+      });
+      sheetMsg = writeRes.ok ? ' | Sheet Col U synced ✓' : ` | Sheet: ${writeRes.message}`;
+    }
+
+    setIsSavingLedger(false);
+    if (fbRes.ok) {
+      setLedgerFirebaseStatus('synced');
+      setLedgerStatusNote(`Saved to Firebase /dispatch_history ✓${sheetMsg}`);
+    } else {
+      setLedgerFirebaseStatus('local_only');
+      setLedgerStatusNote(`Saved locally (${fbRes.reason || 'Firebase check'})${sheetMsg}`);
+    }
+
+    setSyncFeedbackTone('success');
+    setSyncFeedback(`${feedbackPrefix} Total Col U = ${newTotalDispatched.toLocaleString()} | Col V Bal = ${newBalance.toLocaleString()}${sheetMsg}`);
+    setTimeout(() => setSyncFeedback(null), 4500);
+  };
+
+  // Add Next Part Dispatch inside Ledger Box (auto-preserves legacy Col U qty as Entry #1!)
+  const handleAddPartDispatch = async () => {
+    if (!ledgerModalTarget) return;
+    const { order, item, itemKey } = ledgerModalTarget;
+    const addQty = Number(ledgerDispatchQty);
+    if (!addQty || isNaN(addQty) || addQty <= 0) return;
+
+    const existingEntries = dispatchHistoryMap[itemKey] || [];
+    const currentColU = dispatchRecords[itemKey] !== undefined ? dispatchRecords[itemKey] : (Number(item.dispatchQty) || 0);
+
+    const baseEntries: DispatchHistoryEntry[] = [...existingEntries];
+    // Auto-preserve pre-existing Col U qty as Entry #1 if user had already entered a value earlier
+    if (baseEntries.length === 0 && currentColU > 0) {
+      baseEntries.push({
+        id: `dh_init_${Date.now()}`,
+        entryNo: 1,
+        totalOrderQty: item.qty,
+        dispatchQty: currentColU,
+        runningTotalDispatched: currentColU,
+        runningBalance: Number((item.qty - currentColU).toFixed(4)),
+        dispatchDate: formatDateToIsoSafe(order.orderDate),
+        savedTimestamp: order.orderNoTimestamp || order.timestamp || 'Pre-existing Col U',
+        note: 'Initial Col U Dispatch (Auto-preserved)',
+        isLegacyInitial: true
+      });
+    }
+
+    const nextEntry: DispatchHistoryEntry = {
+      id: `dh_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      entryNo: baseEntries.length + 1,
+      totalOrderQty: item.qty,
+      dispatchQty: addQty,
+      runningTotalDispatched: 0,
+      runningBalance: 0,
+      dispatchDate: ledgerDispatchDate || getTodayIsoDate(),
+      savedTimestamp: new Date().toLocaleString('en-IN', { hour12: true }),
+      note: ledgerNote.trim() || undefined
+    };
+
+    const recalculated = recalculateDispatchEntries([...baseEntries, nextEntry], item.qty);
+    setLedgerDispatchQty('');
+    setLedgerNote('');
+    await commitLedgerEntries(
+      order,
+      item,
+      itemKey,
+      recalculated,
+      `✓ Part Dispatch +${addQty.toLocaleString()} added for ${item.itemName}!`
+    );
+  };
+
+  // Delete an entry from Part Dispatch Ledger
+  const handleDeletePartDispatchEntry = async (entryId: string) => {
+    if (!ledgerModalTarget) return;
+    const { order, item, itemKey } = ledgerModalTarget;
+    const existingEntries = dispatchHistoryMap[itemKey] || [];
+    const filtered = existingEntries.filter(e => e.id !== entryId);
+    const recalculated = recalculateDispatchEntries(filtered, item.qty);
+    await commitLedgerEntries(
+      order,
+      item,
+      itemKey,
+      recalculated,
+      `✓ Entry deleted from ${item.itemName} Ledger.`
+    );
   };
 
   // Delete an entire order
@@ -1627,6 +2004,62 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
   };
 
+  // Col AK: Inline Transport Name update (local live typing) & commit (blur / Enter -> Sheet Col AK)
+  const handleUpdateColAK = (orderKey: string, newVal: string) => {
+    setColAKTransporters(prev => ({ ...prev, [orderKey]: newVal }));
+    setWhatsAppModalOrder(prev => (prev && prev.orderKey === orderKey ? { ...prev, transporterName: newVal } : prev));
+  };
+
+  const handleCommitColAK = async (order: GroupedOrder, rawVal: string) => {
+    const gk = order.orderKey;
+    const cleanTransport = rawVal.trim();
+    const originalTransport = (order.transporterName || '').trim();
+
+    setColAKTransporters(prev => {
+      const next = { ...prev, [gk]: cleanTransport };
+      try { localStorage.setItem(LOCAL_STORAGE_COL_AK_KEY, JSON.stringify(next)); } catch {}
+      return next;
+    });
+
+    setAutomationRows(prev =>
+      prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, transporterName: cleanTransport } : r))
+    );
+    setRawResponses(prev =>
+      prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, transporterName: cleanTransport } : r))
+    );
+    setWhatsAppModalOrder(prev => (prev && prev.orderKey === gk ? { ...prev, transporterName: cleanTransport } : prev));
+
+    if (cleanTransport === originalTransport) return;
+
+    if (webAppUrl && webAppUrl.trim().startsWith('https://script.google.com/')) {
+      const matchedAutoRow = automationRows.find(r => buildOrderGroupKey(r) === gk);
+      const sheetRowIndex = order.sheetRowIndex || matchedAutoRow?.sheetRowIndex;
+      const writeRes = await pushOrderUpdateToGoogleSheet(webAppUrl, {
+        action: 'updateTransportName',
+        sheetRowIndex,
+        timestamp: order.timestamp,
+        orderDate: order.orderDate,
+        customerName: order.customerName,
+        itemName: order.items[0]?.itemName,
+        orderNo: order.orderNo,
+        transporterName: cleanTransport
+      });
+
+      if (writeRes.ok) {
+        setSyncFeedbackTone('success');
+        setSyncFeedback(`✓ Transport Name updated to "${cleanTransport || '—'}" in Col AK & Google Sheet.`);
+      } else {
+        setSyncFeedbackTone('success');
+        setSyncFeedback(`✓ Transport Name "${cleanTransport || '—'}" saved in App.`);
+      }
+      setTimeout(() => setSyncFeedback(null), 3500);
+    } else {
+      setSyncFeedbackTone('success');
+      setSyncFeedback(`✓ Transport Name "${cleanTransport || '—'}" updated for ${order.customerName}.`);
+      setTimeout(() => setSyncFeedback(null), 3000);
+    }
+  };
+
   // Col AA: Confirmation Mail ("Pending" | "Sent") -> Triggers GmailApp Confirmation Email & updates Col AB
   const handleConfirmationMailChange = async (order: GroupedOrder, newVal: 'Pending' | 'Sent') => {
     const gk = order.orderKey;
@@ -1984,7 +2417,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           `"${order.customerNumber || ''}"`,
           `"${(order.billingAddress || '').replace(/"/g, '""')}"`,
           `"${(order.deliveryAddress || '').replace(/"/g, '""')}"`,
-          `"${order.transporterName || ''}"`,
+          `"${(colAKTransporters[order.orderKey] ?? order.transporterName ?? '').trim()}"`,
           `"${order.salesPerson || ''}"`,
           `"${order.accountStatus || ''}"`,
           `"${order.approvalStatus || ''}"`,
@@ -2756,7 +3189,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         if (colKey === 'AH' && !selectedVals.includes(colAHChecks[order.orderKey] ? 'Checked' : 'Unchecked')) return;
         if (colKey === 'AI' && !selectedVals.includes(colAITimestamps[order.orderKey] || '—')) return;
         if (colKey === 'AJ' && !selectedVals.includes(colAJRemarks[order.orderKey] || '')) return;
-        if (colKey === 'AK' && !selectedVals.includes(order.transporterName || 'Atc express')) return;
+        if (colKey === 'AK' && !selectedVals.includes((colAKTransporters[order.orderKey] ?? order.transporterName ?? '').trim() || 'Atc express')) return;
         if (colKey === 'AL' && !selectedVals.includes(lrNumbers[order.orderKey] || '')) return;
         if (colKey === 'AN' && !selectedVals.includes(anStatuses[order.orderKey] || 'Pending')) return;
         if (colKey === 'AP') {
@@ -2785,7 +3218,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         } else {
           const matchesPO = (order.customerPO || '').toLowerCase().includes(q);
           const matchesSales = (order.salesPerson || '').toLowerCase().includes(q);
-          const matchesTransporter = (order.transporterName || '').toLowerCase().includes(q);
+          const matchesTransporter = ((colAKTransporters[order.orderKey] ?? order.transporterName ?? '').trim()).toLowerCase().includes(q);
           const matchesAnyItem = relevantItems.some(
             it => (it.itemName || '').toLowerCase().includes(q) || (it.color || '').toLowerCase().includes(q)
           );
@@ -2828,7 +3261,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     }
 
     return result;
-  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, searchMode, colFilters, sortConfig, acStatuses, anStatuses, colWStatuses, colXRemarks, colTEmails, colMailAAStatuses, colMailABStatuses, colAPStatuses, colAQStatuses, colAEChecks, colAFTimestamps, colAGRemarks, colAHChecks, colAITimestamps, colAJRemarks, lrNumbers]);
+  }, [groupedOrders, activeSheetTab, statusFilter, searchTerm, searchMode, colFilters, sortConfig, acStatuses, anStatuses, colWStatuses, colXRemarks, colTEmails, colAKTransporters, colMailAAStatuses, colMailABStatuses, colAPStatuses, colAQStatuses, colAEChecks, colAFTimestamps, colAGRemarks, colAHChecks, colAITimestamps, colAJRemarks, lrNumbers]);
 
   // Virtual Pagination for Product Automation & Closed Orders to prevent browser crash/freeze
   const [automationPage, setAutomationPage] = useState(1);
@@ -2940,7 +3373,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       else if (col === 'AH') set.add(colAHChecks[o.orderKey] ? 'Checked' : 'Unchecked');
       else if (col === 'AI') set.add(colAITimestamps[o.orderKey] || '—');
       else if (col === 'AJ') set.add(colAJRemarks[o.orderKey] || '');
-      else if (col === 'AK') set.add(o.transporterName || 'Atc express');
+      else if (col === 'AK') set.add((colAKTransporters[o.orderKey] ?? o.transporterName ?? '').trim() || 'Atc express');
       else if (col === 'AL') set.add(lrNumbers[o.orderKey] || '');
       else if (col === 'AM') o.items.forEach(it => set.add(isItemComplete(it.statusAN) ? 'Complete' : (it.statusAN || 'Open')));
       else if (col === 'AN') set.add(anStatuses[o.orderKey] || 'Pending');
@@ -3524,6 +3957,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   freezeColumns,
                   {
                     onDispatchChange: handleDispatchChange,
+                    dispatchHistoryMap,
+                    onOpenPartDispatchLedger: handleOpenPartDispatchLedger,
                     onItemStatusChange: handleItemStatusChange,
                     onDeleteOrder: handleDeleteOrder,
                     onDeleteItem: handleDeleteItem,
@@ -3545,6 +3980,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                     colTEmails,
                     onUpdateColT: handleUpdateColT,
                     onCommitColT: handleCommitColT,
+                    colAKTransporters,
+                    onUpdateColAK: handleUpdateColAK,
+                    onCommitColAK: handleCommitColAK,
                     colMailAAStatuses,
                     colMailABStatuses,
                     sendingMailOrderKey,
@@ -4557,10 +4995,40 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       {/* MODAL: WHATSAPP DISPATCH PREVIEW */}
       {whatsAppModalOrder && (() => {
         const cleanPhone = (whatsAppModalOrder.customerNumber || '').replace(/[+\-\s]/g, '').replace(/^0+/, '');
-        const itemBlocks = whatsAppModalOrder.items.map(it => (
+
+        const getLatestDispatchInfo = (it: OrderItem): { qty: number; dispatchDate?: string; isFromLedger: boolean } => {
+          const itemKey = buildItemDispatchKey(whatsAppModalOrder.orderKey, it);
+          const entries = dispatchHistoryMap[itemKey] || [];
+          if (entries.length === 0) {
+            return { qty: it.dispatchQty || 0, isFromLedger: false };
+          }
+          let latest = entries[entries.length - 1];
+          for (const e of entries) {
+            const dA = (e.dispatchDate || '').trim();
+            const dB = (latest.dispatchDate || '').trim();
+            if (dA > dB || (dA === dB && (e.entryNo || 0) >= (latest.entryNo || 0))) {
+              latest = e;
+            }
+          }
+          return {
+            qty: Number(latest.dispatchQty) || 0,
+            dispatchDate: latest.dispatchDate,
+            isFromLedger: true
+          };
+        };
+
+        const latestInfos = whatsAppModalOrder.items.map(it => getLatestDispatchInfo(it));
+        const hasLedgerQty = latestInfos.some(info => info.isFromLedger);
+        const latestDateLabel = latestInfos
+          .map(i => i.dispatchDate || '')
+          .filter(Boolean)
+          .sort()
+          .pop();
+
+        const itemBlocks = whatsAppModalOrder.items.map((it, idx) => (
           `*Item Name*    : ${it.itemName}\n` +
           `*Color*        : ${it.color}\n` +
-          `*Dispatch Qnt* : ${it.dispatchQty || 0}\n` +
+          `*Dispatch Qnt* : ${latestInfos[idx].qty}\n` +
           `*Unit of Item* : ${it.unitOfItem}`
         )).join('\n--------------------------\n');
 
@@ -4570,8 +5038,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           `*Order Summary*\n` +
           `--------------------------\n` +
           `Order Date : ${whatsAppModalOrder.orderDate}\n` +
-          `Order No   : ${whatsAppModalOrder.orderNo || 'DMN/02241/25-26'}\n` +
-          `Transporter: ${whatsAppModalOrder.transporterName || 'Mehta transport'}\n\n` +
+          `Order No   : ${whatsAppModalOrder.orderNo || 'DMN/02241/25-26'}\n\n` +
           `*Dispatched Items*\n` +
           `--------------------------\n` +
           itemBlocks + `\n\n` +
@@ -4588,8 +5055,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                     <MessageSquare className="w-5 h-5" />
                   </span>
                   <div>
-                    <h3 className="font-bold text-sm">WhatsApp Dispatch Link Preview (Col AO → AP)</h3>
-                    <p className="text-[11px] text-emerald-100">Formula generated via HYPERLINK + ENCODEURL</p>
+                    <h3 className="font-bold text-sm">WhatsApp Dispatch Link Preview (Col AN → AO)</h3>
+                    <p className="text-[11px] text-emerald-100">Current dispatch qty synced from Part-Dispatch Ledger</p>
                   </div>
                 </div>
                 <button
@@ -4603,25 +5070,32 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               <div className="p-5 space-y-4 max-h-[75vh] overflow-y-auto">
                 <div className="grid grid-cols-2 gap-3 text-xs bg-slate-50 p-3 rounded-lg border border-slate-200">
                   <div>
-                    <span className="text-slate-500 block text-[11px]">Customer &amp; Phone (Col P)</span>
+                    <span className="text-slate-500 block text-[11px]">Customer &amp; Phone (Col N)</span>
                     <span className="font-bold text-slate-800">{whatsAppModalOrder.customerName}</span>
                     <span className="font-mono text-emerald-700 block">{cleanPhone || '8800421410'}</span>
                   </div>
                   <div>
-                    <span className="text-slate-500 block text-[11px]">Order No &amp; Date (Col X &amp; E)</span>
+                    <span className="text-slate-500 block text-[11px]">Order No &amp; Date (Col S &amp; C)</span>
                     <span className="font-bold text-slate-800">{whatsAppModalOrder.orderNo || 'DMN/02241/25-26'}</span>
                     <span className="text-slate-600 block">{whatsAppModalOrder.orderDate}</span>
                   </div>
                 </div>
 
                 <div>
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
                     <label className="text-xs font-semibold text-slate-700">
                       Dispatched Message (Multi-item summary):
                     </label>
-                    <span className="text-[11px] text-emerald-700 font-medium bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
-                      {whatsAppModalOrder.items.length} Product Items
-                    </span>
+                    <div className="flex items-center gap-1.5">
+                      {hasLedgerQty && (
+                        <span className="text-[10px] text-amber-800 font-semibold bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                          Latest Date Qty{latestDateLabel ? ` (${latestDateLabel})` : ''}
+                        </span>
+                      )}
+                      <span className="text-[11px] text-emerald-700 font-medium bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
+                        {whatsAppModalOrder.items.length} Product Items
+                      </span>
+                    </div>
                   </div>
                   <div className="bg-[#eef8f2] border border-[#c1e7ce] p-3.5 rounded-xl font-mono text-xs whitespace-pre-wrap text-slate-800 leading-relaxed shadow-inner">
                     {messageText}
@@ -4938,6 +5412,332 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           </div>
         </div>
       )}
+
+      {/* MODAL: COL U PART-DISPATCH + LEDGER BOX (Firebase Cloud /dispatch_history) */}
+      {ledgerModalTarget && (() => {
+        const { order, item, itemKey } = ledgerModalTarget;
+        const savedEntries = dispatchHistoryMap[itemKey] || [];
+        const rawColUQty = dispatchRecords[itemKey] !== undefined ? dispatchRecords[itemKey] : (Number(item.dispatchQty) || 0);
+
+        // Display preview list: if savedEntries is empty but Col U has pre-existing qty, preview it as Entry #1
+        const displayEntries: DispatchHistoryEntry[] = savedEntries.length > 0
+          ? savedEntries
+          : rawColUQty > 0
+          ? [{
+              id: 'preview_legacy_1',
+              entryNo: 1,
+              totalOrderQty: item.qty,
+              dispatchQty: rawColUQty,
+              runningTotalDispatched: rawColUQty,
+              runningBalance: Number((item.qty - rawColUQty).toFixed(4)),
+              dispatchDate: formatDateToIsoSafe(order.orderDate),
+              savedTimestamp: order.orderNoTimestamp || order.timestamp || 'Pre-existing Col U',
+              note: 'Existing Col U Dispatch (Auto-preserves as Entry #1 on next add)',
+              isLegacyInitial: true
+            }]
+          : [];
+
+        const currentDispatchedTotal = savedEntries.length > 0
+          ? Number(savedEntries.reduce((s, e) => s + (Number(e.dispatchQty) || 0), 0).toFixed(4))
+          : rawColUQty;
+        const currentBalance = Number((item.qty - currentDispatchedTotal).toFixed(4));
+
+        const parsedNewDispatch = Number(ledgerDispatchQty) || 0;
+        const previewTotalAfterAdd = Number((currentDispatchedTotal + Math.max(0, parsedNewDispatch)).toFixed(4));
+        const previewBalanceAfterAdd = Number((item.qty - previewTotalAfterAdd).toFixed(4));
+
+        return (
+          <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl max-w-4xl w-full overflow-hidden border border-slate-200 flex flex-col max-h-[90vh]">
+              {/* Header */}
+              <div className="px-5 py-3.5 bg-slate-900 text-white flex items-center justify-between gap-3 shrink-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <div className="p-2 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-300 shrink-0">
+                    <Layers className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h3 className="font-bold text-sm truncate">Part Dispatch Ledger Box — Col U</h3>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
+                        <Flame className="w-3 h-3" />
+                        <span>Firebase /dispatch_history</span>
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-300 truncate mt-0.5">
+                      <span className="font-semibold text-white">{order.customerName}</span>
+                      {order.orderNo ? ` • Order #${order.orderNo}` : ''}
+                      {` • ${item.itemName}`}
+                      {item.color ? ` (${item.color})` : ''}
+                      {item.width ? ` • ${item.width}` : ''}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setLedgerModalTarget(null)}
+                  className="p-1.5 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4 overflow-y-auto">
+                {/* KPI Strip: Total Qnt (I) | Total Dispatched (U) | Balance Qnt (V) */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-3">
+                    <span className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide block">
+                      Total Qnt (I)
+                    </span>
+                    <div className="text-xl font-extrabold font-mono text-slate-900 mt-1 tabular-nums">
+                      {item.qty.toLocaleString()} <span className="text-xs font-semibold text-slate-500">{item.unitOfItem}</span>
+                    </div>
+                  </div>
+
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-3">
+                    <span className="text-[11px] font-semibold text-amber-800 uppercase tracking-wide block">
+                      Total Dispatched (U)
+                    </span>
+                    <div className="text-xl font-extrabold font-mono text-amber-900 mt-1 tabular-nums flex items-baseline gap-2">
+                      <span>{currentDispatchedTotal.toLocaleString()}</span>
+                      <span className="text-xs font-semibold text-amber-700">{item.unitOfItem}</span>
+                      {displayEntries.length > 0 && (
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-amber-200/80 text-amber-950">
+                          {displayEntries.length} {displayEntries.length === 1 ? 'Entry' : 'Entries'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className={`border rounded-xl p-3 ${currentBalance <= 0 ? 'bg-emerald-50 border-emerald-200' : 'bg-sky-50 border-sky-200'}`}>
+                    <span className={`text-[11px] font-semibold uppercase tracking-wide block ${currentBalance <= 0 ? 'text-emerald-800' : 'text-sky-800'}`}>
+                      Balance Qnt (V) = I − U
+                    </span>
+                    <div className={`text-xl font-extrabold font-mono mt-1 tabular-nums ${currentBalance <= 0 ? 'text-emerald-900' : 'text-sky-900'}`}>
+                      {currentBalance.toLocaleString()} <span className="text-xs font-semibold opacity-75">{item.unitOfItem}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* History Table */}
+                <div className="border border-slate-200 rounded-xl overflow-hidden">
+                  <div className="px-3.5 py-2 bg-slate-100 border-b border-slate-200 flex items-center justify-between">
+                    <h4 className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-slate-600" />
+                      <span>Part Dispatch History Ledger</span>
+                    </h4>
+                    {ledgerFirebaseStatus !== 'idle' && (
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded border ${
+                        ledgerFirebaseStatus === 'synced'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : 'bg-amber-50 text-amber-800 border-amber-200'
+                      }`}>
+                        {ledgerStatusNote}
+                      </span>
+                    )}
+                  </div>
+
+                  {displayEntries.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-500 bg-white">
+                      Abhi koi dispatch entry nahi hai. Neeche form se 1st Part Dispatch add karein.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left border-collapse">
+                        <thead>
+                          <tr className="bg-slate-50 border-b border-slate-200 text-[11px] font-bold text-slate-600">
+                            <th className="px-3 py-2">#</th>
+                            <th className="px-3 py-2 text-right">Total Qnt (I)</th>
+                            <th className="px-3 py-2">Dispatch Date</th>
+                            <th className="px-3 py-2">Saved Timestamp</th>
+                            <th className="px-3 py-2 text-right">+Dispatch Qnt</th>
+                            <th className="px-3 py-2 text-right">Running Balance (V)</th>
+                            <th className="px-3 py-2">Note / Challan</th>
+                            <th className="px-3 py-2 text-center">Delete</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100 bg-white">
+                          {displayEntries.map((entry) => (
+                            <tr key={entry.id} className="hover:bg-slate-50/70">
+                              <td className="px-3 py-2 font-mono font-bold text-slate-700">
+                                #{entry.entryNo}
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono text-slate-600 tabular-nums">
+                                {entry.totalOrderQty.toLocaleString()}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-slate-800 whitespace-nowrap">
+                                {entry.dispatchDate}
+                              </td>
+                              <td className="px-3 py-2 font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                                {entry.savedTimestamp}
+                              </td>
+                              <td className="px-3 py-2 text-right font-mono font-bold text-amber-800 tabular-nums">
+                                +{entry.dispatchQty.toLocaleString()}
+                              </td>
+                              <td className={`px-3 py-2 text-right font-mono font-bold tabular-nums ${entry.runningBalance <= 0 ? 'text-emerald-700' : 'text-slate-900'}`}>
+                                {entry.runningBalance.toLocaleString()}
+                              </td>
+                              <td className="px-3 py-2 text-slate-700 max-w-[200px]">
+                                {entry.note ? (
+                                  <span className={entry.isLegacyInitial ? 'text-[11px] text-amber-700 italic' : 'text-xs'}>
+                                    {entry.note}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-300">—</span>
+                                )}
+                              </td>
+                              <td className="px-3 py-2 text-center">
+                                {entry.id === 'preview_legacy_1' ? (
+                                  <span className="text-[10px] text-slate-400 italic">Auto #1</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={isSavingLedger}
+                                    onClick={() => handleDeletePartDispatchEntry(entry.id)}
+                                    className="p-1 rounded text-rose-600 hover:bg-rose-50 hover:text-rose-700 transition-colors cursor-pointer disabled:opacity-40"
+                                    title="Delete this part dispatch entry"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+
+                {/* Add Next Part Dispatch Form */}
+                <div className="bg-amber-50/50 border border-amber-200 rounded-xl p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h4 className="text-xs font-extrabold text-amber-950 uppercase tracking-wide flex items-center gap-1.5">
+                      <PlusCircle className="w-4 h-4 text-amber-700" />
+                      <span>Add Next Part Dispatch</span>
+                    </h4>
+                    {savedEntries.length === 0 && rawColUQty > 0 && (
+                      <span className="text-[11px] font-medium text-amber-800 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
+                        Purani Col U Qty ({rawColUQty.toLocaleString()}) automatically Entry #1 bankar preserve hogi
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                        Total Qnt (I)
+                      </label>
+                      <input
+                        type="text"
+                        readOnly
+                        value={item.qty.toLocaleString()}
+                        className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-slate-100 border border-slate-300 rounded-lg text-slate-700"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                        Dispatch Date
+                      </label>
+                      <input
+                        type="date"
+                        value={ledgerDispatchDate}
+                        onChange={(e) => setLedgerDispatchDate(e.target.value)}
+                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-800 focus:ring-1 focus:ring-amber-500 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                        +Dispatch Qnt
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          step="any"
+                          min="0"
+                          placeholder="e.g. 10000"
+                          value={ledgerDispatchQty}
+                          onChange={(e) => setLedgerDispatchQty(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && parsedNewDispatch > 0) {
+                              e.preventDefault();
+                              handleAddPartDispatch();
+                            }
+                          }}
+                          className="w-full px-2.5 py-1.5 text-xs font-mono font-bold bg-white border border-amber-400 rounded-lg text-amber-950 focus:ring-1 focus:ring-amber-500 focus:outline-none"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setLedgerDispatchQty(String(Math.max(0, currentBalance)))}
+                          disabled={currentBalance <= 0}
+                          className="px-2 py-1.5 text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-lg hover:bg-emerald-200 transition-colors whitespace-nowrap cursor-pointer disabled:opacity-40"
+                          title="Fill remaining Balance Qnt"
+                        >
+                          Fill Bal
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                        Note / Challan (Optional)
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="Challan No / Lot note..."
+                        value={ledgerNote}
+                        onChange={(e) => setLedgerNote(e.target.value)}
+                        className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg text-slate-800 focus:ring-1 focus:ring-amber-500 focus:outline-none"
+                      />
+                    </div>
+                  </div>
+
+                  {/* Live Balance Preview before submit */}
+                  <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                    <div className="text-xs flex flex-wrap items-center gap-3">
+                      <span className="text-slate-600">
+                        Live Preview:
+                      </span>
+                      <span className="font-mono font-bold text-amber-900 bg-white px-2.5 py-1 rounded border border-amber-200">
+                        New Col U Dispatched: {previewTotalAfterAdd.toLocaleString()}
+                      </span>
+                      <span className={`font-mono font-bold px-2.5 py-1 rounded border ${
+                        previewBalanceAfterAdd < 0
+                          ? 'bg-rose-50 text-rose-700 border-rose-200'
+                          : previewBalanceAfterAdd === 0
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                          : 'bg-sky-50 text-sky-800 border-sky-200'
+                      }`}>
+                        New Col V Balance: {previewBalanceAfterAdd.toLocaleString()}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setLedgerModalTarget(null)}
+                        className="px-3.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 cursor-pointer"
+                      >
+                        Close
+                      </button>
+                      <button
+                        type="button"
+                        disabled={isSavingLedger || parsedNewDispatch <= 0}
+                        onClick={handleAddPartDispatch}
+                        className="inline-flex items-center gap-1.5 px-4 py-1.5 text-xs font-bold bg-amber-600 hover:bg-amber-700 text-white rounded-lg shadow-xs transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        {isSavingLedger ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Plus className="w-3.5 h-3.5" />}
+                        <span>Save Part Dispatch</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };
@@ -4950,6 +5750,8 @@ function renderSpreadsheetRows(
   freezeColumns: number,
   handlers: {
     onDispatchChange: (orderKey: string, item: any, valStr: string) => void;
+    dispatchHistoryMap: Record<string, DispatchHistoryEntry[]>;
+    onOpenPartDispatchLedger: (order: GroupedOrder, item: OrderItem) => void;
     onItemStatusChange: (orderId: string, newStatus: 'Open' | 'In-Progress' | 'Closed' | 'Complete') => void;
     onDeleteOrder: (orderKey: string, poName: string) => void;
     onDeleteItem: (itemOrderId: string) => void;
@@ -4971,6 +5773,9 @@ function renderSpreadsheetRows(
     colTEmails: Record<string, string>;
     onUpdateColT: (orderKey: string, val: string) => void;
     onCommitColT: (order: GroupedOrder, val: string) => void;
+    colAKTransporters: Record<string, string>;
+    onUpdateColAK: (orderKey: string, val: string) => void;
+    onCommitColAK: (order: GroupedOrder, val: string) => void;
     colMailAAStatuses: Record<string, string>;
     colMailABStatuses: Record<string, string>;
     sendingMailOrderKey: string | null;
@@ -5313,27 +6118,58 @@ function renderSpreadsheetRows(
             </>
           )}
 
-          {/* COLUMN U: DISPATCH QNT (ITEM ROW USER ENTRY) */}
-          {visibleCols['U'] && (
-            <td
-              className={`px-1.5 py-0.5 border-r border-slate-300 bg-amber-50/40 whitespace-nowrap text-right ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
-            >
-              <div className="flex items-center justify-end gap-1">
-                <input
-                  type="number"
-                  step="any"
-                  value={item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : ''}
-                  placeholder="0"
-                  style={{ width: `${Math.min(12, Math.max(6, String(item.dispatchQty ?? '').length + 3))}ch` }}
-                  onChange={(e) => handlers.onDispatchChange(order.orderKey, item, e.target.value)}
-                  className="px-1.5 py-0.5 text-right font-mono text-[11px] font-bold text-amber-950 bg-white border border-amber-300 rounded focus:ring-1 focus:ring-amber-500 focus:outline-none h-6 print:hidden"
-                />
-                <span className="hidden print:inline-block font-mono font-bold text-slate-900 text-[11px]">
-                  {item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : 0}
-                </span>
-              </div>
-            </td>
-          )}
+          {/* COLUMN U: DISPATCH QNT (ITEM ROW USER ENTRY + PART-DISPATCH LEDGER BUTTON) */}
+          {visibleCols['U'] && (() => {
+            const itemKey = buildItemDispatchKey(currentOrderKey, item);
+            const ledgerEntries = handlers.dispatchHistoryMap[itemKey] || [];
+            const entryCount = ledgerEntries.length;
+            return (
+              <td
+                className={`px-1.5 py-0.5 border-r border-slate-300 bg-amber-50/40 whitespace-nowrap text-right ${useMerge && isLast ? 'border-b-2 border-b-slate-400' : ''}`}
+              >
+                <div className="flex items-center justify-end gap-1">
+                  {entryCount > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => handlers.onOpenPartDispatchLedger(order, item)}
+                      style={{ width: `${Math.min(12, Math.max(6, String(item.dispatchQty ?? 0).length + 3))}ch` }}
+                      className="px-1.5 py-0.5 text-right font-mono text-[11px] font-bold text-amber-950 bg-white border border-amber-400 rounded hover:bg-amber-50 h-6 cursor-pointer print:hidden"
+                      title={`Total of ${entryCount} Part Dispatch entries — Click to view/add in Ledger`}
+                    >
+                      {item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : 0}
+                    </button>
+                  ) : (
+                    <input
+                      type="number"
+                      step="any"
+                      value={item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : ''}
+                      placeholder="0"
+                      style={{ width: `${Math.min(12, Math.max(6, String(item.dispatchQty ?? '').length + 3))}ch` }}
+                      onChange={(e) => handlers.onDispatchChange(order.orderKey, item, e.target.value)}
+                      className="px-1.5 py-0.5 text-right font-mono text-[11px] font-bold text-amber-950 bg-white border border-amber-300 rounded focus:ring-1 focus:ring-amber-500 focus:outline-none h-6 print:hidden"
+                    />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handlers.onOpenPartDispatchLedger(order, item)}
+                    className={`inline-flex items-center justify-center px-1.5 h-6 rounded text-[10px] font-extrabold border transition-all cursor-pointer shrink-0 print:hidden ${
+                      entryCount >= 2
+                        ? 'bg-amber-600 text-white border-amber-700 hover:bg-amber-700 shadow-2xs'
+                        : entryCount === 1
+                        ? 'bg-emerald-600 text-white border-emerald-700 hover:bg-emerald-700 shadow-2xs'
+                        : 'bg-amber-100 text-amber-900 border-amber-300 hover:bg-amber-200'
+                    }`}
+                    title={entryCount >= 2 ? `${entryCount} Part Dispatches — Click to open Part Dispatch Ledger Box` : 'Open Part Dispatch Ledger Box'}
+                  >
+                    {entryCount >= 2 ? `+${entryCount}` : '+'}
+                  </button>
+                  <span className="hidden print:inline-block font-mono font-bold text-slate-900 text-[11px]">
+                    {item.dispatchQty !== undefined && item.dispatchQty !== null ? item.dispatchQty : 0}
+                  </span>
+                </div>
+              </td>
+            );
+          })()}
 
           {/* COLUMN V: BALANCE QNT (= I - U) */}
           {visibleCols['V'] && (
@@ -5616,12 +6452,33 @@ function renderSpreadsheetRows(
                 );
               })()}
 
-              {/* Col AK: Transport Name */}
-              {visibleCols['AK'] && (
-                <td rowSpan={rowSpan} className={`px-1.5 py-0.5 border-r border-slate-300 text-slate-700 align-middle whitespace-nowrap text-[11px] ${cellBottomBorder}`}>
-                  {order.transporterName || 'Atc express'}
-                </td>
-              )}
+              {/* Col AK: Transport Name (Editable inline & synced to Google Sheet Col AK) */}
+              {visibleCols['AK'] && (() => {
+                const transportVal = handlers.colAKTransporters[currentOrderKey] !== undefined
+                  ? handlers.colAKTransporters[currentOrderKey]
+                  : (order.transporterName || '');
+                const widthCh = Math.min(24, Math.max(11, (transportVal || 'Atc express').length + 2));
+                return (
+                  <td rowSpan={rowSpan} className={`px-1 py-0.5 border-r border-slate-300 text-slate-700 align-middle whitespace-nowrap text-[11px] ${cellBottomBorder}`}>
+                    <input
+                      type="text"
+                      value={transportVal}
+                      placeholder="Atc express"
+                      style={{ width: `${widthCh}ch` }}
+                      onChange={(e) => handlers.onUpdateColAK(currentOrderKey, e.target.value)}
+                      onBlur={(e) => handlers.onCommitColAK(order, e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          e.currentTarget.blur();
+                        }
+                      }}
+                      className="px-1.5 py-0.5 text-[11px] text-slate-800 bg-transparent hover:bg-white focus:bg-white border border-transparent hover:border-slate-300 focus:border-emerald-500 rounded h-6 focus:outline-none transition-colors"
+                      title="Col AK: Editable Transport Name (WhatsApp Dispatch msg me show hoga)"
+                    />
+                  </td>
+                );
+              })()}
 
               {/* Col AL: LR- Number */}
               {visibleCols['AL'] && (() => {

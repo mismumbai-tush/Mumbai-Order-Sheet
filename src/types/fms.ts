@@ -111,3 +111,17 @@ export interface ColumnMapItem {
   description: string;
   example: string;
 }
+
+export interface DispatchHistoryEntry {
+  id: string;
+  entryNo: number;
+  totalOrderQty: number;
+  dispatchQty: number;
+  runningTotalDispatched: number;
+  runningBalance: number;
+  dispatchDate: string;
+  savedTimestamp: string;
+  note?: string;
+  isLegacyInitial?: boolean;
+}
+
