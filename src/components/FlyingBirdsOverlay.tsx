@@ -75,7 +75,7 @@ export const FlyingBirdsOverlay: React.FC = () => {
     <div
       key={flight.key}
       aria-hidden="true"
-      className="fixed inset-0 z-50 pointer-events-none overflow-hidden select-none print:hidden"
+      className="fixed inset-0 z-40 pointer-events-none overflow-hidden select-none print:hidden"
     >
       {FLOCK_SPECS.map((bird) => (
         <div

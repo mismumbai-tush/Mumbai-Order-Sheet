@@ -1,43 +1,24 @@
 import React, { useState, useMemo, useRef, useLayoutEffect, useEffect } from 'react';
 import { ProductOrderRow } from '../types/fms';
 import { productOrderColumns } from '../data/sampleOrders';
-import { QUERY_COLUMN_MAPPINGS } from '../utils/googleQueryFetcher';
 import {
   Sparkles,
-  Plus,
   ExternalLink,
   CheckCircle2,
   AlertCircle,
-  Copy,
-  Check,
-  Filter,
-  Layers,
   X,
   ChevronLeft,
   ChevronRight,
   Trash2,
-  Upload,
-  Calendar,
-  Clock,
-  Zap,
-  Info,
-  RefreshCw,
-  FileSpreadsheet,
-  ArrowRight,
-  Columns3,
-  Lock,
-  RotateCcw,
   Edit3,
-  Link2,
-  Loader2,
-  ArrowUpDown,
   Pin,
-  Bell,
-  EyeOff,
-  Eye
+  EyeOff
 } from 'lucide-react';
 
 export type SearchBasisMode = 'customer_or_order' | 'customer' | 'order_no' | 'all';
+export type ProductOrderSortOrder = 'newest' | 'pending' | 'sheet';
+export type ProductOrderFreezeTarget = 'NONE' | '#' | 'A' | 'B' | 'C' | 'D' | 'E';
+export type NewOrdersFilterMode = 'NONE' | 'LAST_MONTH_TODAY' | 'TODAY_YESTERDAY';
 
 interface ProductOrderViewProps {
   orders: ProductOrderRow[];
@@ -53,7 +34,7 @@ interface ProductOrderViewProps {
   onOpenImportModal?: () => void;
   onUpdateRow?: (orderId: string, field: keyof ProductOrderRow, value: any) => void;
   onNavigateToAutomation: () => void;
-  onAddNewRow: (row: ProductOrderRow) => void;
+  onAddNewRow?: (row: ProductOrderRow) => void;
   onFetchQueryLive?: () => void;
   isFetchingLive?: boolean;
   onOpenQueryStudio?: () => void;
@@ -64,6 +45,16 @@ interface ProductOrderViewProps {
   onOpenColumnManager?: () => void;
   onHideColumn?: (colLetter: string) => void;
   onShowAllColumns?: () => void;
+  newOrdersFilterMode?: NewOrdersFilterMode;
+  selectedYear?: string;
+  selectedMonth?: string;
+  sortOrder?: ProductOrderSortOrder;
+  freezeUpTo?: ProductOrderFreezeTarget;
+  currentPage?: number;
+  setCurrentPage?: React.Dispatch<React.SetStateAction<number>>;
+  pageSize?: number;
+  setPageSize?: React.Dispatch<React.SetStateAction<number>>;
+  highlightedOrderId?: string | null;
 }
 
 // Robust helper to parse order date and timestamp into year, month, day
@@ -117,120 +108,162 @@ function toLocalMidnightDate(info: { year?: number; month?: number; day?: number
   return new Date(info.year, info.month - 1, info.day, 0, 0, 0, 0);
 }
 
+export function extractAvailableYears(orders: ProductOrderRow[]): string[] {
+  const yearsSet = new Set<string>();
+  orders.forEach(row => {
+    const info = parseOrderDateInfo(row.orderDate, row.timestamp);
+    if (info.year && info.year >= 2020 && info.year <= 2035) {
+      yearsSet.add(String(info.year));
+    }
+  });
+  if (yearsSet.size === 0) {
+    yearsSet.add(String(new Date().getFullYear()));
+  }
+  return Array.from(yearsSet).sort().reverse();
+}
+
+export interface CustomerOrderGroup {
+  customerKey: string;
+  customerName: string;
+  rows: ProductOrderRow[];
+  dayTag: 'TODAY' | 'KAL' | 'RECENT';
+  latestDateTs: number;
+  highestWeight: number;
+  totalQty: number;
+  salesPerson: string;
+  latestDateLabel: string;
+}
+
+export function computeNewOrdersMetrics(orders: ProductOrderRow[]) {
+  const now = new Date();
+  const todayY = now.getFullYear();
+  const todayM = now.getMonth() + 1;
+  const todayD = now.getDate();
+
+  const yest = new Date(now);
+  yest.setDate(yest.getDate() - 1);
+  const yestY = yest.getFullYear();
+  const yestM = yest.getMonth() + 1;
+  const yestD = yest.getDate();
+
+  const lastMonthStart = new Date(todayY, todayM - 2, todayD, 0, 0, 0, 0);
+  const todayEnd = new Date(todayY, todayM - 1, todayD, 23, 59, 59, 999);
+
+  const rawBlankItems: Array<{ row: ProductOrderRow; weight: number }> = [];
+  const customerMap = new Map<string, CustomerOrderGroup>();
+
+  orders.forEach((row, idx) => {
+    const hasBlankOrderNo = !row.orderNo || row.orderNo.trim() === '';
+    if (!hasBlankOrderNo) return;
+
+    const info = parseOrderDateInfo(row.orderDate, row.timestamp);
+    const localDate = toLocalMidnightDate(info);
+    if (!localDate) return;
+
+    if (localDate >= lastMonthStart && localDate <= todayEnd) {
+      const weight = row.sheetRowIndex ?? idx;
+      rawBlankItems.push({ row, weight });
+
+      const isToday = info.year === todayY && info.month === todayM && info.day === todayD;
+      const isYest = info.year === yestY && info.month === yestM && info.day === yestD;
+      const rowTag: 'TODAY' | 'KAL' | 'RECENT' = isToday ? 'TODAY' : isYest ? 'KAL' : 'RECENT';
+      const dateTs = localDate.getTime();
+
+      const displayCustomer = (row.customerName || 'Unknown Customer').trim();
+      const customerKey = displayCustomer.toLowerCase();
+      const existing = customerMap.get(customerKey);
+
+      if (!existing) {
+        customerMap.set(customerKey, {
+          customerKey,
+          customerName: displayCustomer,
+          rows: [row],
+          dayTag: rowTag,
+          latestDateTs: dateTs,
+          highestWeight: weight,
+          totalQty: Number(row.qty) || 0,
+          salesPerson: row.salesPerson || '',
+          latestDateLabel: row.orderDate || row.timestamp?.split(' ')[0] || ''
+        });
+      } else {
+        existing.rows.push(row);
+        existing.totalQty += Number(row.qty) || 0;
+        if (!existing.salesPerson && row.salesPerson) {
+          existing.salesPerson = row.salesPerson;
+        }
+        if (rowTag === 'TODAY' || (rowTag === 'KAL' && existing.dayTag === 'RECENT')) {
+          existing.dayTag = rowTag;
+        }
+        if (dateTs > existing.latestDateTs) {
+          existing.latestDateTs = dateTs;
+          existing.latestDateLabel = row.orderDate || row.timestamp?.split(' ')[0] || existing.latestDateLabel;
+        }
+        if (weight > existing.highestWeight) {
+          existing.highestWeight = weight;
+        }
+      }
+    }
+  });
+
+  const customerGroups = Array.from(customerMap.values()).sort((a, b) => {
+    if (b.latestDateTs !== a.latestDateTs) return b.latestDateTs - a.latestDateTs;
+    return b.highestWeight - a.highestWeight;
+  });
+
+  customerGroups.forEach(g => {
+    g.rows.sort((a, b) => (b.sheetRowIndex ?? 0) - (a.sheetRowIndex ?? 0));
+  });
+
+  const todayYesterdayGroups = customerGroups.filter(
+    g => g.dayTag === 'TODAY' || g.dayTag === 'KAL'
+  );
+
+  return {
+    rawBlankItems,
+    customerGroups,
+    todayYesterdayGroups,
+    totalNewCount: customerGroups.length,
+    todayYesterdayCount: todayYesterdayGroups.length,
+    totalRowCount: rawBlankItems.length,
+    windowLabel: `${lastMonthStart.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} – Today`
+  };
+}
+
 export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
   orders,
   searchTerm,
-  setSearchTerm,
   searchMode = 'customer_or_order',
   visibleCols,
   isFullWidth,
   onGenerateOrderNo,
-  onGenerateAllPending,
-  onDeleteRow,
   onClearAllRows,
-  onOpenImportModal,
   onNavigateToAutomation,
-  onAddNewRow,
-  onFetchQueryLive,
-  isFetchingLive,
-  onOpenQueryStudio,
-  onPurgeDelhiAndLock,
-  lastSyncedAt,
-  webAppConfigured,
-  onOpenTwoWaySyncModal,
-  onOpenColumnManager,
   onHideColumn,
-  onShowAllColumns
+  newOrdersFilterMode = 'NONE',
+  selectedYear = 'ALL',
+  selectedMonth = 'ALL',
+  sortOrder = 'newest',
+  freezeUpTo = 'B',
+  currentPage: propCurrentPage,
+  setCurrentPage: propSetCurrentPage,
+  pageSize: propPageSize,
+  setPageSize: propSetPageSize,
+  highlightedOrderId = null
 }) => {
-  const [filterPendingOnly, setFilterPendingOnly] = useState(false);
-  const [filterTodayYesterdayOnly, setFilterTodayYesterdayOnly] = useState(false);
-  const [newOrdersFilterMode, setNewOrdersFilterMode] = useState<'NONE' | 'LAST_MONTH_TODAY' | 'TODAY_YESTERDAY'>('NONE');
-  const [showNewOrdersNotif, setShowNewOrdersNotif] = useState(false);
-  const newOrdersNotifRef = useRef<HTMLDivElement | null>(null);
-  const [selectedYear, setSelectedYear] = useState<string>('ALL');
-  const [selectedMonth, setSelectedMonth] = useState<string>('ALL');
-  const [sortOrder, setSortOrder] = useState<'newest' | 'pending' | 'sheet'>('newest');
   const [inputOrderNos, setInputOrderNos] = useState<Record<string, string>>({});
   const [editingRowId, setEditingRowId] = useState<string | null>(null);
-  const [showAddModal, setShowAddModal] = useState(false);
   const [showClearConfirmModal, setShowClearConfirmModal] = useState(false);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [copiedQuery, setCopiedQuery] = useState(false);
-  const [showQueryMap, setShowQueryMap] = useState(false);
-  const [highlightedOrderId, setHighlightedOrderId] = useState<string | null>(null);
-  const [navNotification, setNavNotification] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!showNewOrdersNotif) return;
-    const handleOutside = (e: MouseEvent) => {
-      if (newOrdersNotifRef.current && !newOrdersNotifRef.current.contains(e.target as Node)) {
-        setShowNewOrdersNotif(false);
-      }
-    };
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setShowNewOrdersNotif(false);
-    };
-    document.addEventListener('mousedown', handleOutside);
-    document.addEventListener('keydown', handleEsc);
-    return () => {
-      document.removeEventListener('mousedown', handleOutside);
-      document.removeEventListener('keydown', handleEsc);
-    };
-  }, [showNewOrdersNotif]);
+  const [localCurrentPage, setLocalCurrentPage] = useState(1);
+  const [localPageSize, setLocalPageSize] = useState<number>(30);
+  const currentPage = propCurrentPage ?? localCurrentPage;
+  const setCurrentPage = propSetCurrentPage ?? setLocalCurrentPage;
+  const pageSize = propPageSize ?? localPageSize;
+  const setPageSize = propSetPageSize ?? setLocalPageSize;
 
   useEffect(() => {
     setCurrentPage(1);
   }, [searchTerm, searchMode]);
-
-  // Freeze / Unfreeze columns state for Product Order (persisted in localStorage)
-  type FreezeTarget = 'NONE' | '#' | 'A' | 'B' | 'C' | 'D' | 'E';
-  const [freezeUpTo, setFreezeUpTo] = useState<FreezeTarget>(() => {
-    try {
-      const saved = localStorage.getItem('ginza_po_freeze_col_v1') as FreezeTarget | null;
-      if (saved && ['NONE', '#', 'A', 'B', 'C', 'D', 'E'].includes(saved)) return saved;
-    } catch {}
-    return 'B'; // Default: Freeze #, Timestamp (A), Customer Name (B)
-  });
-  const [lastFreezeTarget, setLastFreezeTarget] = useState<Exclude<FreezeTarget, 'NONE'>>(() => {
-    try {
-      const saved = localStorage.getItem('ginza_po_freeze_col_v1') as FreezeTarget | null;
-      if (saved && saved !== 'NONE' && ['#', 'A', 'B', 'C', 'D', 'E'].includes(saved)) {
-        return saved as Exclude<FreezeTarget, 'NONE'>;
-      }
-    } catch {}
-    return 'B';
-  });
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('ginza_po_freeze_col_v1', freezeUpTo);
-    } catch {}
-    if (freezeUpTo !== 'NONE') {
-      setLastFreezeTarget(freezeUpTo);
-    }
-  }, [freezeUpTo]);
-
-  // Fast Virtual Pagination (Default 30 rows in view for zero-lag rendering)
-  const [currentPage, setCurrentPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(30);
-
-  // The Google Sheet Query Formula connecting Orders!A:R to Product Order
-  const queryFormula = `=QUERY(IMPORTRANGE("1TksqSeCWat_0CRRPTxA0nAMiQFtUO17xUhtqHJM2JAs", "Orders!A:R"), "select Col1, Col2,Col8,Col9, Col10, Col11, Col12, Col13, Col14, Col15, Col16, Col17, Col18, Col3, Col4, Col5, Col6, Col7 ", 1)`;
-
-  // Dynamically extract available years from actual orders data
-  const availableYears = useMemo(() => {
-    const yearsSet = new Set<string>();
-    orders.forEach(row => {
-      const info = parseOrderDateInfo(row.orderDate, row.timestamp);
-      if (info.year && info.year >= 2020 && info.year <= 2035) {
-        yearsSet.add(String(info.year));
-      }
-    });
-    if (yearsSet.size === 0) {
-      yearsSet.add(String(new Date().getFullYear()));
-    }
-    return Array.from(yearsSet).sort().reverse();
-  }, [orders]);
 
   // Filtered rows based on: Search, Pending O.N, Year, Month, Today/Yesterday
   const filteredRows = useMemo(() => {
@@ -247,11 +280,6 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
 
     const matched = orders.filter(row => {
       const hasBlankOrderNo = !row.orderNo || row.orderNo.trim() === '';
-
-      // 1. Pending O.N filter
-      if (filterPendingOnly && !hasBlankOrderNo) {
-        return false;
-      }
 
       const dateInfo = parseOrderDateInfo(row.orderDate, row.timestamp);
       const rowLocalDate = toLocalMidnightDate(dateInfo);
@@ -270,13 +298,6 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
             return false;
           }
         }
-      }
-
-      // 2. Today / Yesterday filter
-      if (filterTodayYesterdayOnly) {
-        const isToday = dateInfo.year === todayY && dateInfo.month === todayM && dateInfo.day === todayD;
-        const isYest = dateInfo.year === yestY && dateInfo.month === yestM && dateInfo.day === yestD;
-        if (!isToday && !isYest) return false;
       }
 
       // 3. Year filter
@@ -344,118 +365,7 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
     }
 
     return matched;
-  }, [orders, filterPendingOnly, filterTodayYesterdayOnly, newOrdersFilterMode, selectedYear, selectedMonth, searchTerm, searchMode, sortOrder]);
-
-  // Live New Orders Metrics (Counted by unique Customer Name with blank Col S Order No., Last Month -> Today)
-  const newOrdersMetrics = useMemo(() => {
-    const now = new Date();
-    const todayY = now.getFullYear();
-    const todayM = now.getMonth() + 1;
-    const todayD = now.getDate();
-
-    const yest = new Date(now);
-    yest.setDate(yest.getDate() - 1);
-    const yestY = yest.getFullYear();
-    const yestM = yest.getMonth() + 1;
-    const yestD = yest.getDate();
-
-    const lastMonthStart = new Date(todayY, todayM - 2, todayD, 0, 0, 0, 0);
-    const todayEnd = new Date(todayY, todayM - 1, todayD, 23, 59, 59, 999);
-
-    const rawBlankItems: Array<{ row: ProductOrderRow; weight: number }> = [];
-
-    interface CustomerOrderGroup {
-      customerKey: string;
-      customerName: string;
-      rows: ProductOrderRow[];
-      dayTag: 'TODAY' | 'KAL' | 'RECENT';
-      latestDateTs: number;
-      highestWeight: number;
-      totalQty: number;
-      salesPerson: string;
-      latestDateLabel: string;
-    }
-
-    const customerMap = new Map<string, CustomerOrderGroup>();
-
-    orders.forEach((row, idx) => {
-      const hasBlankOrderNo = !row.orderNo || row.orderNo.trim() === '';
-      if (!hasBlankOrderNo) return;
-
-      const info = parseOrderDateInfo(row.orderDate, row.timestamp);
-      const localDate = toLocalMidnightDate(info);
-      if (!localDate) return;
-
-      if (localDate >= lastMonthStart && localDate <= todayEnd) {
-        const weight = row.sheetRowIndex ?? idx;
-        rawBlankItems.push({ row, weight });
-
-        const isToday = info.year === todayY && info.month === todayM && info.day === todayD;
-        const isYest = info.year === yestY && info.month === yestM && info.day === yestD;
-        const rowTag: 'TODAY' | 'KAL' | 'RECENT' = isToday ? 'TODAY' : isYest ? 'KAL' : 'RECENT';
-        const dateTs = localDate.getTime();
-
-        const displayCustomer = (row.customerName || 'Unknown Customer').trim();
-        const customerKey = displayCustomer.toLowerCase();
-        const existing = customerMap.get(customerKey);
-
-        if (!existing) {
-          customerMap.set(customerKey, {
-            customerKey,
-            customerName: displayCustomer,
-            rows: [row],
-            dayTag: rowTag,
-            latestDateTs: dateTs,
-            highestWeight: weight,
-            totalQty: Number(row.qty) || 0,
-            salesPerson: row.salesPerson || '',
-            latestDateLabel: row.orderDate || row.timestamp?.split(' ')[0] || ''
-          });
-        } else {
-          existing.rows.push(row);
-          existing.totalQty += Number(row.qty) || 0;
-          if (!existing.salesPerson && row.salesPerson) {
-            existing.salesPerson = row.salesPerson;
-          }
-          // Upgrade tag priority: TODAY > KAL > RECENT
-          if (rowTag === 'TODAY' || (rowTag === 'KAL' && existing.dayTag === 'RECENT')) {
-            existing.dayTag = rowTag;
-          }
-          if (dateTs > existing.latestDateTs) {
-            existing.latestDateTs = dateTs;
-            existing.latestDateLabel = row.orderDate || row.timestamp?.split(' ')[0] || existing.latestDateLabel;
-          }
-          if (weight > existing.highestWeight) {
-            existing.highestWeight = weight;
-          }
-        }
-      }
-    });
-
-    const customerGroups = Array.from(customerMap.values()).sort((a, b) => {
-      if (b.latestDateTs !== a.latestDateTs) return b.latestDateTs - a.latestDateTs;
-      return b.highestWeight - a.highestWeight;
-    });
-
-    // Ensure each customer's rows have highest sheet row first for instant jump
-    customerGroups.forEach(g => {
-      g.rows.sort((a, b) => (b.sheetRowIndex ?? 0) - (a.sheetRowIndex ?? 0));
-    });
-
-    const todayYesterdayGroups = customerGroups.filter(
-      g => g.dayTag === 'TODAY' || g.dayTag === 'KAL'
-    );
-
-    return {
-      rawBlankItems,
-      customerGroups,
-      todayYesterdayGroups,
-      totalNewCount: customerGroups.length,
-      todayYesterdayCount: todayYesterdayGroups.length,
-      totalRowCount: rawBlankItems.length,
-      windowLabel: `${lastMonthStart.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })} – Today`
-    };
-  }, [orders]);
+  }, [orders, newOrdersFilterMode, selectedYear, selectedMonth, searchTerm, searchMode, sortOrder]);
 
   // Safe pagination calculation
   const totalPages = Math.max(1, Math.ceil(filteredRows.length / (pageSize || 30)));
@@ -467,451 +377,9 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
     return filteredRows.slice(start, start + pageSize);
   }, [filteredRows, safeCurrentPage, pageSize]);
 
-  const pendingCount = useMemo(() => {
-    return orders.filter(r => !r.orderNo || r.orderNo.trim() === '').length;
-  }, [orders]);
-
-  const activeAssignedCount = orders.length - pendingCount;
-
-  // Jump cursor / page directly to Today / Yesterday's incoming new order
-  const handleJumpToNewOrders = () => {
-    const now = new Date();
-    const todayY = now.getFullYear();
-    const todayM = now.getMonth() + 1;
-    const todayD = now.getDate();
-
-    const yest = new Date();
-    yest.setDate(yest.getDate() - 1);
-    const yestY = yest.getFullYear();
-    const yestM = yest.getMonth() + 1;
-    const yestD = yest.getDate();
-
-    // Check if any order matches Today or Yesterday
-    let targetIndex = -1;
-    let targetOrder: ProductOrderRow | null = null;
-    let matchType = 'Today';
-
-    for (let i = 0; i < orders.length; i++) {
-      const o = orders[i];
-      const d = parseOrderDateInfo(o.orderDate, o.timestamp);
-      if (d.year === todayY && d.month === todayM && d.day === todayD) {
-        targetIndex = i;
-        targetOrder = o;
-        matchType = 'Today';
-        break;
-      } else if (d.year === yestY && d.month === yestM && d.day === yestD) {
-        targetIndex = i;
-        targetOrder = o;
-        matchType = 'Yesterday';
-        break;
-      }
-    }
-
-    if (targetOrder) {
-      // Clear year/month filter if it hides this order
-      if (selectedYear !== 'ALL') setSelectedYear('ALL');
-      if (selectedMonth !== 'ALL') setSelectedMonth('ALL');
-      if (filterPendingOnly && targetOrder.orderNo) setFilterPendingOnly(false);
-
-      // Find index in filteredRows
-      const fIdx = filteredRows.findIndex(r => r.orderId === targetOrder?.orderId);
-      const activeIdx = fIdx >= 0 ? fIdx : targetIndex;
-      const targetPage = Math.floor(activeIdx / (pageSize || 30)) + 1;
-      setCurrentPage(targetPage);
-      setHighlightedOrderId(targetOrder.orderId);
-
-      setTimeout(() => {
-        const el = document.getElementById(`order-row-${targetOrder?.orderId}`);
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        }
-      }, 150);
-
-      setNavNotification(`🎯 Jumped to ${matchType}'s Order (Row #${activeIdx + 1}): "${targetOrder.customerName}" - ${targetOrder.itemName}`);
-      setTimeout(() => setNavNotification(null), 4500);
-      setTimeout(() => setHighlightedOrderId(null), 6000);
-    } else {
-      // If no today/yesterday matches, navigate to the very latest incoming order at Row #1
-      setCurrentPage(1);
-      if (orders.length > 0) {
-        const topOrder = orders[0];
-        setHighlightedOrderId(topOrder.orderId);
-        setTimeout(() => {
-          const el = document.getElementById(`order-row-${topOrder.orderId}`);
-          if (el) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-          }
-        }, 150);
-      }
-      setNavNotification(`⚡ Checked Today & Yesterday: No dated entries found. Jumped to latest incoming order at Row #1.`);
-      setTimeout(() => setNavNotification(null), 4500);
-      setTimeout(() => setHighlightedOrderId(null), 6000);
-    }
-  };
-
-  const handleCopyText = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
-
-  const handleCopyQuery = () => {
-    navigator.clipboard.writeText(queryFormula);
-    setCopiedQuery(true);
-    setTimeout(() => setCopiedQuery(false), 2500);
-  };
-
-  const handleJumpToSingleNewOrder = (targetOrder: ProductOrderRow) => {
-    setSelectedYear('ALL');
-    setSelectedMonth('ALL');
-    setFilterPendingOnly(false);
-    setFilterTodayYesterdayOnly(false);
-    setNewOrdersFilterMode('LAST_MONTH_TODAY');
-    setSortOrder('newest');
-    setShowNewOrdersNotif(false);
-
-    const sortedBySheetRow = [...newOrdersMetrics.rawBlankItems].sort((a, b) => b.weight - a.weight);
-    const idxInFiltered = sortedBySheetRow.findIndex(item => item.row.orderId === targetOrder.orderId);
-    const targetPage = idxInFiltered >= 0 && pageSize > 0 ? Math.floor(idxInFiltered / pageSize) + 1 : 1;
-    setCurrentPage(targetPage);
-    setHighlightedOrderId(targetOrder.orderId);
-
-    setTimeout(() => {
-      const el = document.getElementById(`order-row-${targetOrder.orderId}`);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      }
-    }, 120);
-
-    setTimeout(() => setHighlightedOrderId(null), 6000);
-  };
-
   return (
-    <div className="space-y-1.5">
-      {/* Product Order Clean Action Toolbar */}
-      <div className="flex flex-wrap items-center justify-between gap-2 px-1 py-1 text-xs">
-        {/* Left Side: New Orders Notification Box (Before Year) + Year Filter + Month Filter + Sort */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* NEW ORDERS NOTIFICATION BOX (Col S Order No Blank: Last Month -> Today + Today/Kal Indicator) */}
-          <div ref={newOrdersNotifRef} className="relative">
-            <div className="flex items-center">
-              <button
-                type="button"
-                onClick={() => setShowNewOrdersNotif(prev => !prev)}
-                className={`flex items-center gap-1.5 rounded-lg px-2.5 py-0.5 border text-xs font-bold shadow-2xs transition-all cursor-pointer ${
-                  newOrdersFilterMode !== 'NONE'
-                    ? 'bg-amber-600 text-white border-amber-700 hover:bg-amber-700'
-                    : newOrdersMetrics.totalNewCount > 0
-                      ? 'bg-amber-50 text-amber-950 border-amber-300 hover:bg-amber-100'
-                      : 'bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100'
-                }`}
-                title="New Orders (Blank Col S Order No.) from Last Month to Today — Click to view & filter"
-              >
-                <span className="relative flex items-center justify-center">
-                  <Bell className={`w-3.5 h-3.5 ${
-                    newOrdersFilterMode !== 'NONE'
-                      ? 'text-white'
-                      : newOrdersMetrics.totalNewCount > 0
-                        ? 'text-amber-600'
-                        : 'text-emerald-600'
-                  }`} />
-                  {newOrdersMetrics.totalNewCount > 0 && newOrdersFilterMode === 'NONE' && (
-                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-500 animate-ping" />
-                  )}
-                  {newOrdersMetrics.totalNewCount > 0 && (
-                    <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-500" />
-                  )}
-                </span>
-
-                <span>New Orders</span>
-
-                <span
-                  className={`px-1.5 py-0.2 rounded-full font-mono text-[11px] font-extrabold ${
-                    newOrdersFilterMode !== 'NONE'
-                      ? 'bg-white text-amber-800'
-                      : newOrdersMetrics.totalNewCount > 0
-                        ? 'bg-rose-600 text-white'
-                        : 'bg-emerald-200 text-emerald-900'
-                  }`}
-                >
-                  {newOrdersMetrics.totalNewCount}
-                </span>
-              </button>
-
-              {newOrdersFilterMode !== 'NONE' && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setNewOrdersFilterMode('NONE');
-                    setCurrentPage(1);
-                  }}
-                  className="ml-1 p-1 rounded-md bg-rose-100 hover:bg-rose-200 text-rose-700 border border-rose-300 cursor-pointer"
-                  title="Clear New Orders filter"
-                >
-                  <X className="w-3 h-3" />
-                </button>
-              )}
-            </div>
-
-            {/* Notification Popover Panel */}
-            {showNewOrdersNotif && (
-              <div className="absolute left-0 top-full mt-1.5 w-[350px] sm:w-[410px] bg-white border border-slate-300 rounded-xl shadow-2xl z-50 overflow-hidden">
-                {/* Header */}
-                <div className="px-3.5 py-2.5 bg-slate-900 text-white flex items-center justify-between">
-                  <div>
-                    <div className="flex items-center gap-1.5 font-bold text-xs">
-                      <Bell className="w-3.5 h-3.5 text-amber-400" />
-                      <span>New Orders Notification (Col S Blank)</span>
-                    </div>
-                    <p className="text-[10px] text-slate-300 mt-0.5">
-                      Window: <span className="font-semibold text-amber-200">{newOrdersMetrics.windowLabel}</span> — Order No. pending
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowNewOrdersNotif(false)}
-                    className="text-slate-400 hover:text-white p-1 rounded cursor-pointer"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                {/* Live Summary Counter + 1-Click Grid Filter */}
-                <div className="p-2.5 bg-amber-50/70 border-b border-amber-200 flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedYear('ALL');
-                      setSelectedMonth('ALL');
-                      setFilterTodayYesterdayOnly(false);
-                      setNewOrdersFilterMode(prev => prev === 'LAST_MONTH_TODAY' ? 'NONE' : 'LAST_MONTH_TODAY');
-                      setSortOrder('newest');
-                      setCurrentPage(1);
-                      setShowNewOrdersNotif(false);
-                    }}
-                    className={`w-full px-3 py-1.5 rounded-lg border text-[11px] font-bold flex items-center justify-between gap-1.5 cursor-pointer transition-colors ${
-                      newOrdersFilterMode === 'LAST_MONTH_TODAY'
-                        ? 'bg-amber-600 text-white border-amber-700'
-                        : 'bg-white text-slate-800 border-amber-300 hover:bg-amber-100'
-                    }`}
-                  >
-                    <span>Last Month – Today (Filter Grid)</span>
-                    <span className={`px-2 py-0.2 rounded font-mono ${
-                      newOrdersFilterMode === 'LAST_MONTH_TODAY' ? 'bg-white text-amber-800' : 'bg-rose-100 text-rose-800'
-                    }`}>
-                      {newOrdersMetrics.totalNewCount} Customers
-                    </span>
-                  </button>
-                </div>
-
-                {/* Live List of New Blank-Order-No. Customers */}
-                <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
-                  {newOrdersMetrics.totalNewCount === 0 ? (
-                    <div className="py-8 px-4 text-center text-slate-500 text-xs">
-                      <CheckCircle2 className="w-7 h-7 text-emerald-500 mx-auto mb-1.5" />
-                      <p className="font-semibold text-slate-800">All Last Month – Today orders have Order Numbers!</p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">Koi bhi blank Col S customer pending nahi hai.</p>
-                    </div>
-                  ) : (
-                    newOrdersMetrics.customerGroups.slice(0, 60).map((group) => {
-                      const primaryRow = group.rows[0];
-                      return (
-                        <button
-                          key={group.customerKey}
-                          type="button"
-                          onClick={() => handleJumpToSingleNewOrder(primaryRow)}
-                          className="w-full text-left px-3 py-2 hover:bg-amber-50/70 transition-colors flex items-start justify-between gap-2 cursor-pointer"
-                        >
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              {group.dayTag === 'TODAY' ? (
-                                <span className="px-1.5 py-0.2 rounded bg-emerald-600 text-white text-[9px] font-extrabold uppercase shrink-0">
-                                  Today
-                                </span>
-                              ) : group.dayTag === 'KAL' ? (
-                                <span className="px-1.5 py-0.2 rounded bg-sky-600 text-white text-[9px] font-extrabold uppercase shrink-0">
-                                  Kal
-                                </span>
-                              ) : (
-                                <span className="px-1.5 py-0.2 rounded bg-slate-200 text-slate-700 text-[9px] font-bold shrink-0">
-                                  {group.latestDateLabel}
-                                </span>
-                              )}
-                              <span className="font-bold text-slate-900 truncate text-xs">
-                                {group.customerName}
-                              </span>
-                            </div>
-                            <div className="text-[11px] text-slate-600 truncate mt-0.5">
-                              {group.rows.length > 1
-                                ? `${group.rows.length} Items (${primaryRow.itemName || '—'} + ${group.rows.length - 1} more)`
-                                : (primaryRow.itemName || '—')}{' '}
-                              • Total Qty: <span className="font-mono font-semibold text-slate-800">{group.totalQty.toLocaleString()}</span>
-                              {group.salesPerson ? ` • ${group.salesPerson}` : ''}
-                            </div>
-                          </div>
-                          <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-mono text-[10px] font-bold">
-                            {group.rows.length > 1 ? `${group.rows.length} Rows` : `Row #${primaryRow.sheetRowIndex || 'New'}`}
-                          </span>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-
-                {newOrdersMetrics.totalNewCount > 60 && (
-                  <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-200 text-[10px] text-slate-500 text-center">
-                    Showing latest 60 of {newOrdersMetrics.totalNewCount} pending customers — click &quot;Last Month – Today&quot; above to view all in table.
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* Year Filter Dropdown */}
-          <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs">
-            <Calendar className="w-3.5 h-3.5 text-slate-400" />
-            <span className="text-slate-500 text-[11px] font-medium">Year:</span>
-            <select
-              value={selectedYear}
-              onChange={(e) => {
-                setSelectedYear(e.target.value);
-                setNewOrdersFilterMode('NONE');
-                setCurrentPage(1);
-              }}
-              className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
-            >
-              <option value="ALL">All Years</option>
-              {availableYears.map(yr => (
-                <option key={yr} value={yr}>{yr}</option>
-              ))}
-            </select>
-          </div>
-
-          {/* Month Filter Dropdown */}
-          <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs">
-            <span className="text-slate-500 text-[11px] font-medium">Month:</span>
-            <select
-              value={selectedMonth}
-              onChange={(e) => {
-                setSelectedMonth(e.target.value);
-                setNewOrdersFilterMode('NONE');
-                setCurrentPage(1);
-              }}
-              className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
-            >
-              <option value="ALL">All Months</option>
-              <option value="1">Jan (01)</option>
-              <option value="2">Feb (02)</option>
-              <option value="3">Mar (03)</option>
-              <option value="4">Apr (04)</option>
-              <option value="5">May (05)</option>
-              <option value="6">Jun (06)</option>
-              <option value="7">Jul (07)</option>
-              <option value="8">Aug (08)</option>
-              <option value="9">Sep (09)</option>
-              <option value="10">Oct (10)</option>
-              <option value="11">Nov (11)</option>
-              <option value="12">Dec (12)</option>
-            </select>
-          </div>
-
-          {/* Sort Mode Selector */}
-          <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs">
-            <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
-            <select
-              value={sortOrder}
-              onChange={(e) => {
-                setSortOrder(e.target.value as any);
-                setCurrentPage(1);
-              }}
-              className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
-            >
-              <option value="newest">Newest Sheet Rows First</option>
-              <option value="pending">Pending Order No First</option>
-              <option value="sheet">Sheet Row Order (Old → New)</option>
-            </select>
-          </div>
-          {/* Freeze / Unfreeze Controls */}
-          <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-1.5 py-0.5 shadow-2xs">
-            <button
-              type="button"
-              onClick={() => setFreezeUpTo(prev => (prev === 'NONE' ? lastFreezeTarget : 'NONE'))}
-              className={`px-2 py-0.5 rounded font-bold text-[11px] flex items-center gap-1 transition-colors cursor-pointer ${
-                freezeUpTo !== 'NONE'
-                  ? 'bg-sky-700 text-white hover:bg-sky-800'
-                  : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-              }`}
-              title={freezeUpTo !== 'NONE' ? 'Click to Unfreeze all columns' : 'Click to Freeze columns'}
-            >
-              <Pin className="w-3 h-3" />
-              <span>{freezeUpTo !== 'NONE' ? 'Freeze ON' : 'Unfrozen'}</span>
-            </button>
-            <select
-              value={freezeUpTo}
-              onChange={(e) => setFreezeUpTo(e.target.value as any)}
-              className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs pr-1"
-              title="Select which column to freeze up to"
-            >
-              <option value="NONE">Unfreeze All</option>
-              <option value="#">Freeze # Only</option>
-              <option value="A">Freeze up to Col A (Timestamp)</option>
-              <option value="B">Freeze up to Col B (Customer)</option>
-              <option value="C">Freeze up to Col C (Order Date)</option>
-              <option value="D">Freeze up to Col D (Unit)</option>
-              <option value="E">Freeze up to Col E (Item Name)</option>
-            </select>
-          </div>
-        </div>
-
-        {/* Right Side: Column Hide/Show + Add Row Controls */}
-        <div className="flex flex-wrap items-center gap-2 ml-auto">
-          {(() => {
-            const visibleCount = productOrderColumns.filter(c => !visibleCols || visibleCols[c.colLetter] !== false).length;
-            const hiddenCount = productOrderColumns.length - visibleCount;
-            return (
-              <>
-                {onOpenColumnManager && (
-                  <button
-                    type="button"
-                    onClick={onOpenColumnManager}
-                    className={`px-2.5 py-1 rounded-lg border text-xs font-bold shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer ${
-                      hiddenCount > 0
-                        ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
-                        : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
-                    }`}
-                    title="Select columns to Hide or Show in Product Order"
-                  >
-                    <Columns3 className="w-3.5 h-3.5 text-emerald-700" />
-                    <span>Hide / Show Columns ({visibleCount}/{productOrderColumns.length})</span>
-                  </button>
-                )}
-                {hiddenCount > 0 && onShowAllColumns && (
-                  <button
-                    type="button"
-                    onClick={onShowAllColumns}
-                    className="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer"
-                    title="Show all hidden columns in Product Order"
-                  >
-                    <Eye className="w-3 h-3" />
-                    <span>Unhide All ({hiddenCount})</span>
-                  </button>
-                )}
-              </>
-            );
-          })()}
-
-          {/* + Add Row */}
-          <button
-            onClick={() => setShowAddModal(true)}
-            className="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
-          >
-            <Plus className="w-3.5 h-3.5" />
-            <span>+ Add Row</span>
-          </button>
-        </div>
-      </div>
-
-      {/* 4. Main Flat Table Grid (Columns A to S with Hide/Show & Overlap-Free Frozen Columns) */}
+    <div className="space-y-1.5 w-full max-w-full min-w-0">
+      {/* Main Flat Table Grid (Columns A to S with Hide/Show & Overlap-Free Frozen Columns) */}
       <ProductOrderTableGrid
         paginatedRows={paginatedRows}
         filteredRowsCount={filteredRows.length}
@@ -1042,314 +510,6 @@ export const ProductOrderView: React.FC<ProductOrderViewProps> = ({
         </div>
       )}
 
-      {/* MODAL: ADD NEW ROW TO PRODUCT ORDER */}
-      {showAddModal && (
-        <NewProductOrderRowModal
-          onClose={() => setShowAddModal(false)}
-          onSubmit={(newRow) => {
-            onAddNewRow(newRow);
-            setShowAddModal(false);
-          }}
-        />
-      )}
-    </div>
-  );
-};
-
-// Modal for adding a new row into Product Order (19 Columns A to S)
-interface NewProductOrderRowModalProps {
-  onClose: () => void;
-  onSubmit: (row: ProductOrderRow) => void;
-}
-
-const NewProductOrderRowModal: React.FC<NewProductOrderRowModalProps> = ({ onClose, onSubmit }) => {
-  const [customerName, setCustomerName] = useState('Manju Creation (Santacruz Mumbai)');
-  const [orderDate, setOrderDate] = useState(new Date().toLocaleDateString('en-GB'));
-  const [unit, setUnit] = useState('WARP(UDHANA)');
-  const [itemName, setItemName] = useState('L-4014/NS/56-I');
-  const [color, setColor] = useState('White');
-  const [width, setWidth] = useState('56"');
-  const [unitOfItem, setUnitOfItem] = useState('MTR');
-  const [qty, setQty] = useState('500');
-  const [rate, setRate] = useState('180');
-  const [discount, setDiscount] = useState('10');
-  const [deliveryDate, setDeliveryDate] = useState('20/02/2026');
-  const [remark, setRemark] = useState('Confirm delivery with sales head');
-  const [customerNumber, setCustomerNumber] = useState('9820123456');
-  const [billingAddress, setBillingAddress] = useState('Shop 4, Station Road, Santacruz West, Mumbai, Maharashtra 400054');
-  const [deliveryAddress, setDeliveryAddress] = useState('Shop 4, Station Road, Santacruz West, Mumbai, Maharashtra 400054');
-  const [salesPerson, setSalesPerson] = useState('Santosh Pachratkar');
-  const [salesPersonContact, setSalesPersonContact] = useState('9820011223');
-  const [orderNo, setOrderNo] = useState('');
-  const [generateNow, setGenerateNow] = useState(false);
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const nowStr = new Date().toLocaleString('en-IN');
-    const finalOrderNo = generateNow ? `MMFSO2526-0${Math.floor(1750 + Math.random() * 50)}` : orderNo;
-
-    const newRow: ProductOrderRow = {
-      orderId: `ORD-${Date.now()}`,
-      timestamp: nowStr,
-      customerName,
-      orderDate,
-      unit,
-      itemName,
-      color,
-      width,
-      unitOfItem,
-      qty: Number(qty) || 0,
-      rate: Number(rate) || 0,
-      discount: Number(discount) || 0,
-      deliveryDate,
-      remark,
-      customerNumber,
-      billingAddress,
-      deliveryAddress,
-      salesPerson,
-      salesPersonContact,
-      orderNo: finalOrderNo,
-      orderNoTimestamp: finalOrderNo ? nowStr : '',
-      statusAN: 'Open'
-    };
-
-    onSubmit(newRow);
-  };
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full border border-slate-200 overflow-hidden my-6 animate-in fade-in zoom-in-95 duration-150">
-        <div className="px-6 py-4 bg-gradient-to-r from-blue-900 to-indigo-900 text-white flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <Plus className="w-5 h-5 text-blue-300" />
-            <h3 className="font-bold text-sm sm:text-base">Add New Order Row (Columns A to S)</h3>
-          </div>
-          <button onClick={onClose} className="text-white/70 hover:text-white p-1 rounded-lg hover:bg-white/10">
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="p-6 space-y-4 text-xs">
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col B: Customer Name *</label>
-              <input
-                type="text"
-                required
-                value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col C: Order Date</label>
-              <input
-                type="text"
-                value={orderDate}
-                onChange={(e) => setOrderDate(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col D: Unit</label>
-              <input
-                type="text"
-                value={unit}
-                onChange={(e) => setUnit(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col E: Item Name *</label>
-              <input
-                type="text"
-                required
-                value={itemName}
-                onChange={(e) => setItemName(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-semibold"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col F: Color</label>
-              <input
-                type="text"
-                value={color}
-                onChange={(e) => setColor(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col G: Width</label>
-              <input
-                type="text"
-                value={width}
-                onChange={(e) => setWidth(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col H: Unit (Item)</label>
-              <input
-                type="text"
-                value={unitOfItem}
-                onChange={(e) => setUnitOfItem(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-mono"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col I: Qty *</label>
-              <input
-                type="number"
-                required
-                value={qty}
-                onChange={(e) => setQty(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-mono font-bold"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col J: Rate (₹)</label>
-              <input
-                type="number"
-                value={rate}
-                onChange={(e) => setRate(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-mono"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col K: Discount (%)</label>
-              <input
-                type="number"
-                value={discount}
-                onChange={(e) => setDiscount(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-mono"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col L: Delivery Date</label>
-              <input
-                type="text"
-                value={deliveryDate}
-                onChange={(e) => setDeliveryDate(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col N: Customer Number</label>
-              <input
-                type="text"
-                value={customerNumber}
-                onChange={(e) => setCustomerNumber(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-mono"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col O: Billing Address</label>
-              <input
-                type="text"
-                value={billingAddress}
-                onChange={(e) => setBillingAddress(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col P: Delivery Address</label>
-              <input
-                type="text"
-                value={deliveryAddress}
-                onChange={(e) => setDeliveryAddress(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col Q: Sales Person Name</label>
-              <input
-                type="text"
-                value={salesPerson}
-                onChange={(e) => setSalesPerson(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-              />
-            </div>
-            <div>
-              <label className="font-bold text-slate-700 block mb-1">Col R: Sales Person Contact</label>
-              <input
-                type="text"
-                value={salesPersonContact}
-                onChange={(e) => setSalesPersonContact(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-mono"
-              />
-            </div>
-          </div>
-
-          <div>
-            <label className="font-bold text-slate-700 block mb-1">Col M: Remark</label>
-            <input
-              type="text"
-              value={remark}
-              onChange={(e) => setRemark(e.target.value)}
-              className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs"
-            />
-          </div>
-
-          {/* Col S: Order Number Configuration */}
-          <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl space-y-2">
-            <span className="font-bold text-emerald-950 block">
-              Col S: Order Number (Automation Trigger)
-            </span>
-            <div className="flex items-center gap-4">
-              <label className="flex items-center gap-1.5 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={generateNow}
-                  onChange={(e) => setGenerateNow(e.target.checked)}
-                  className="rounded text-emerald-600 focus:ring-emerald-500"
-                />
-                <span className="font-semibold text-slate-800">Auto-Generate SO# now (Flows into Product Automation)</span>
-              </label>
-            </div>
-            {!generateNow && (
-              <input
-                type="text"
-                placeholder="Leave blank for pending or type manual Order No"
-                value={orderNo}
-                onChange={(e) => setOrderNo(e.target.value)}
-                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-lg text-xs font-mono bg-white"
-              />
-            )}
-          </div>
-
-          <div className="pt-2 border-t border-slate-200 flex items-center justify-end gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 border border-slate-300 rounded-lg text-slate-700 font-semibold hover:bg-slate-100"
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg shadow-sm flex items-center gap-1.5"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Add Order Row</span>
-            </button>
-          </div>
-        </form>
-      </div>
     </div>
   );
 };
@@ -1621,7 +781,7 @@ const ProductOrderTableGrid: React.FC<ProductOrderTableGridProps> = ({
   };
 
   return (
-    <div className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-180px)] max-h-[85vh]' : 'h-[640px] max-h-[76vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}>
+    <div className={`w-full max-w-full overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-145px)] max-h-[88vh] min-h-[320px]' : 'h-[min(640px,calc(100vh-185px))] min-h-[320px]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}>
       <table className="table-auto w-max min-w-full border-separate border-spacing-0 text-xs text-left">
         {/* Sticky Header Rows */}
         <thead className="sticky top-0 z-30 select-none font-mono text-[11px]">

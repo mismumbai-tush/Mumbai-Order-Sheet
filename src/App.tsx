@@ -16,6 +16,7 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'simulator' | 'code' | 'firebase' | 'advisor' | 'columns' | 'guide'>('simulator');
   const [copied, setCopied] = useState(false);
   const [isFullWidth, setIsFullWidth] = useState<boolean>(true); // Default to Full Size for Google Sheet experience
+  const [twoWaySyncOpenTrigger, setTwoWaySyncOpenTrigger] = useState(0);
 
   const handleCopyCode = () => {
     const code = generateGasCode(defaultGasConfig);
@@ -26,7 +27,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col">
+    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col w-full max-w-full overflow-x-clip">
       {/* Ambient Flying Birds Overlay across all tabs (every 1-2 min: Left->Right then Right->Left) */}
       <FlyingBirdsOverlay />
 
@@ -38,18 +39,23 @@ export default function App() {
         copied={copied}
         isFullWidth={isFullWidth}
         setIsFullWidth={setIsFullWidth}
+        onOpenTwoWaySync={() => {
+          setActiveTab('simulator');
+          setTwoWaySyncOpenTrigger(c => c + 1);
+        }}
       />
 
       {/* Main Content Area - Full Size or Boxed Container */}
       <main
-        className={`flex-1 w-full mx-auto py-3 transition-all duration-150 ${
-          isFullWidth ? 'px-2 sm:px-4 max-w-[100vw]' : 'max-w-7xl px-4 sm:px-6 lg:px-8'
+        className={`flex-1 w-full min-w-0 mx-auto py-3 transition-all duration-150 ${
+          isFullWidth ? 'px-2 sm:px-4 max-w-full' : 'max-w-7xl px-4 sm:px-6 lg:px-8'
         }`}
       >
         {activeTab === 'simulator' && (
           <SpreadsheetSimulator
             isFullWidth={isFullWidth}
             setIsFullWidth={setIsFullWidth}
+            twoWaySyncOpenTrigger={twoWaySyncOpenTrigger}
           />
         )}
         {activeTab === 'firebase' && <FirebaseSyncHub />}

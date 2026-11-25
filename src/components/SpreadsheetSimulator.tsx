@@ -1,7 +1,15 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { GroupedOrder, ProductOrderRow, OrderItem, DispatchHistoryEntry } from '../types/fms';
 import { initialRawResponses, initialExistingDispatch, fmsColumnMapping, productOrderColumns } from '../data/sampleOrders';
-import { ProductOrderView, SearchBasisMode } from './ProductOrderView';
+import {
+  ProductOrderView,
+  SearchBasisMode,
+  computeNewOrdersMetrics,
+  extractAvailableYears,
+  ProductOrderSortOrder,
+  ProductOrderFreezeTarget,
+  NewOrdersFilterMode
+} from './ProductOrderView';
 import {
   saveOrdersToStorage,
   loadOrdersFromStorage,
@@ -77,7 +85,9 @@ import {
   ChevronLeft,
   ChevronRight,
   RefreshCw,
-  Radio
+  Radio,
+  Bell,
+  Calendar
 } from 'lucide-react';
 
 const LOCAL_STORAGE_KEY = 'ginza_fms_query_orders_v16_locked';
@@ -189,12 +199,13 @@ interface SpreadsheetSimulatorProps {
   isFullWidth?: boolean;
   setIsFullWidth?: (val: boolean) => void;
   onOpenQueryStudio?: () => void;
+  twoWaySyncOpenTrigger?: number;
 }
 
 export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   isFullWidth = true,
-  setIsFullWidth,
-  onOpenQueryStudio
+  onOpenQueryStudio,
+  twoWaySyncOpenTrigger
 }) => {
   const [isFetchingQueryLive, setIsFetchingQueryLive] = useState(false);
   const [lastSyncedAt, setLastSyncedAt] = useState<string | null>(null);
@@ -215,6 +226,66 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   const [showTwoWaySyncModal, setShowTwoWaySyncModal] = useState(false);
   const [copiedWebAppScript, setCopiedWebAppScript] = useState(false);
   const [testingWebApp, setTestingWebApp] = useState(false);
+
+  useEffect(() => {
+    if (twoWaySyncOpenTrigger && twoWaySyncOpenTrigger > 0) {
+      setShowTwoWaySyncModal(true);
+    }
+  }, [twoWaySyncOpenTrigger]);
+
+  // Product Order lifted toolbar state (Row 1 New Orders + Row 2 Year/Month/Sort/Freeze)
+  const [poNewOrdersFilterMode, setPoNewOrdersFilterMode] = useState<NewOrdersFilterMode>('NONE');
+  const [showNewOrdersNotif, setShowNewOrdersNotif] = useState(false);
+  const newOrdersNotifRef = useRef<HTMLDivElement | null>(null);
+  const [poSelectedYear, setPoSelectedYear] = useState<string>('ALL');
+  const [poSelectedMonth, setPoSelectedMonth] = useState<string>('ALL');
+  const [poSortOrder, setPoSortOrder] = useState<ProductOrderSortOrder>('newest');
+  const [poFreezeUpTo, setPoFreezeUpTo] = useState<ProductOrderFreezeTarget>(() => {
+    try {
+      const saved = localStorage.getItem('ginza_po_freeze_col_v1') as ProductOrderFreezeTarget | null;
+      if (saved && ['NONE', '#', 'A', 'B', 'C', 'D', 'E'].includes(saved)) return saved;
+    } catch {}
+    return 'B';
+  });
+  const [poLastFreezeTarget, setPoLastFreezeTarget] = useState<Exclude<ProductOrderFreezeTarget, 'NONE'>>(() => {
+    try {
+      const saved = localStorage.getItem('ginza_po_freeze_col_v1') as ProductOrderFreezeTarget | null;
+      if (saved && saved !== 'NONE' && ['#', 'A', 'B', 'C', 'D', 'E'].includes(saved)) {
+        return saved as Exclude<ProductOrderFreezeTarget, 'NONE'>;
+      }
+    } catch {}
+    return 'B';
+  });
+  const [poCurrentPage, setPoCurrentPage] = useState(1);
+  const [poPageSize, setPoPageSize] = useState<number>(30);
+  const [poHighlightedOrderId, setPoHighlightedOrderId] = useState<string | null>(null);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('ginza_po_freeze_col_v1', poFreezeUpTo);
+    } catch {}
+    if (poFreezeUpTo !== 'NONE') {
+      setPoLastFreezeTarget(poFreezeUpTo);
+    }
+  }, [poFreezeUpTo]);
+
+  useEffect(() => {
+    if (!showNewOrdersNotif) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (newOrdersNotifRef.current && !newOrdersNotifRef.current.contains(e.target as Node)) {
+        setShowNewOrdersNotif(false);
+      }
+    };
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setShowNewOrdersNotif(false);
+    };
+    document.addEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleEsc);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleEsc);
+    };
+  }, [showNewOrdersNotif]);
 
   // Dataset 1: "Product Order" tab (Cols A to S, gid=0)
   const [rawResponses, setRawResponses] = useState<ProductOrderRow[]>(() => {
@@ -3388,9 +3459,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   };
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 w-full max-w-full min-w-0">
       {/* CONSTANT STICKY TOP SHEET TABS & CENTRALIZED SYNC BAR */}
-      <div className="sticky top-11 z-30 bg-slate-100/95 backdrop-blur-xs border border-slate-300 rounded-xl shadow-xs px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 select-none">
+      <div className="sticky top-11 z-30 bg-slate-100/95 backdrop-blur-xs border border-slate-300 rounded-xl shadow-xs px-2.5 py-1.5 flex flex-wrap items-center justify-between gap-2 select-none min-w-0">
         {/* Top Constant Sheet Tab Names */}
         <div className="flex flex-wrap items-center gap-1.5">
           {/* Tab 1: Product Order */}
@@ -3463,51 +3534,238 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           </button>
         </div>
 
-        {/* Right Side: Live Centralization Sync Controls */}
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white border border-slate-300 text-[11px] text-slate-700">
-            <span className={`w-2 h-2 rounded-full ${liveSyncSource === 'live' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></span>
-            <span className="font-semibold">
-              {liveSyncSource === 'live' ? 'Live Sheet Connected' : 'Local Cache'}
-            </span>
-            {lastSyncedAt && (
-              <span className="font-mono text-[10px] text-slate-500">({lastSyncedAt})</span>
-            )}
-          </div>
+        {/* Right Side: New Orders Notification (before Live Sheet Connected) + Live Sync Controls */}
+        {(() => {
+          const poNewOrdersMetrics = computeNewOrdersMetrics(rawResponses);
+          const handleJumpToSingleNewOrder = (targetOrder: ProductOrderRow) => {
+            setActiveSheetTab('product_order');
+            setPoSelectedYear('ALL');
+            setPoSelectedMonth('ALL');
+            setPoNewOrdersFilterMode('LAST_MONTH_TODAY');
+            setPoSortOrder('newest');
+            setShowNewOrdersNotif(false);
 
-          <button
-            type="button"
-            disabled={isFetchingQueryLive}
-            onClick={() => handleSyncBothLiveSheets(false)}
-            className="px-2.5 py-1 bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-bold rounded-lg shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer"
-            title="Fetch both Product Order & Product Automation live from Google Sheet"
-          >
-            {isFetchingQueryLive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
-            <span>{isFetchingQueryLive ? 'Syncing...' : 'Sync Live Sheet'}</span>
-          </button>
+            const sortedBySheetRow = [...poNewOrdersMetrics.rawBlankItems].sort((a, b) => b.weight - a.weight);
+            const idxInFiltered = sortedBySheetRow.findIndex(item => item.row.orderId === targetOrder.orderId);
+            const targetPage = idxInFiltered >= 0 && poPageSize > 0 ? Math.floor(idxInFiltered / poPageSize) + 1 : 1;
+            setPoCurrentPage(targetPage);
+            setPoHighlightedOrderId(targetOrder.orderId);
 
-          <button
-            type="button"
-            onClick={() => setShowTwoWaySyncModal(true)}
-            className={`px-2.5 py-1 text-xs font-bold rounded-lg border shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer ${
-              webAppUrl
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
-                : 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
-            }`}
-            title="Enable 2-Way Centralization (Write Order No, Dispatch Qty & Col AM directly back to Google Sheet)"
-          >
-            <Link2 className="w-3.5 h-3.5" />
-            <span>{webAppUrl ? '2-Way Sheet Write ON ✓' : '2-Way Sheet Setup'}</span>
-          </button>
-        </div>
+            setTimeout(() => {
+              const el = document.getElementById(`order-row-${targetOrder.orderId}`);
+              if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              }
+            }, 140);
+
+            setTimeout(() => setPoHighlightedOrderId(null), 6000);
+          };
+
+          return (
+            <div className="flex flex-wrap items-center gap-2">
+              {/* NEW ORDERS NOTIFICATION BOX (Placed right before Live Sheet Connected on Row 1) */}
+              <div ref={newOrdersNotifRef} className="relative">
+                <div className="flex items-center">
+                  <button
+                    type="button"
+                    onClick={() => setShowNewOrdersNotif(prev => !prev)}
+                    className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 border text-xs font-bold shadow-2xs transition-all cursor-pointer ${
+                      poNewOrdersFilterMode !== 'NONE'
+                        ? 'bg-amber-600 text-white border-amber-700 hover:bg-amber-700'
+                        : poNewOrdersMetrics.totalNewCount > 0
+                          ? 'bg-amber-50 text-amber-950 border-amber-300 hover:bg-amber-100'
+                          : 'bg-emerald-50 text-emerald-900 border-emerald-200 hover:bg-emerald-100'
+                    }`}
+                    title="New Orders (Blank Col S Order No.) from Last Month to Today — Click to view & filter"
+                  >
+                    <span className="relative flex items-center justify-center">
+                      <Bell className={`w-3.5 h-3.5 ${
+                        poNewOrdersFilterMode !== 'NONE'
+                          ? 'text-white'
+                          : poNewOrdersMetrics.totalNewCount > 0
+                            ? 'text-amber-600'
+                            : 'text-emerald-600'
+                      }`} />
+                      {poNewOrdersMetrics.totalNewCount > 0 && poNewOrdersFilterMode === 'NONE' && (
+                        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-500 animate-ping" />
+                      )}
+                      {poNewOrdersMetrics.totalNewCount > 0 && (
+                        <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-rose-500" />
+                      )}
+                    </span>
+
+                    <span>New Orders</span>
+
+                    <span
+                      className={`px-1.5 py-0.2 rounded-full font-mono text-[11px] font-extrabold ${
+                        poNewOrdersFilterMode !== 'NONE'
+                          ? 'bg-white text-amber-800'
+                          : poNewOrdersMetrics.totalNewCount > 0
+                            ? 'bg-rose-600 text-white'
+                            : 'bg-emerald-200 text-emerald-900'
+                      }`}
+                    >
+                      {poNewOrdersMetrics.totalNewCount}
+                    </span>
+                  </button>
+
+                  {poNewOrdersFilterMode !== 'NONE' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPoNewOrdersFilterMode('NONE');
+                        setPoCurrentPage(1);
+                      }}
+                      className="ml-1 p-1 rounded-md bg-rose-100 hover:bg-rose-200 text-rose-700 border border-rose-300 cursor-pointer"
+                      title="Clear New Orders filter"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Notification Popover Panel */}
+                {showNewOrdersNotif && (
+                  <div className="absolute right-0 top-full mt-1.5 w-[min(390px,calc(100vw-1.5rem))] bg-white border border-slate-300 rounded-xl shadow-2xl z-50 overflow-hidden">
+                    <div className="px-3.5 py-2.5 bg-slate-900 text-white flex items-center justify-between">
+                      <div>
+                        <div className="flex items-center gap-1.5 font-bold text-xs">
+                          <Bell className="w-3.5 h-3.5 text-amber-400" />
+                          <span>New Orders Notification (Col S Blank)</span>
+                        </div>
+                        <p className="text-[10px] text-slate-300 mt-0.5">
+                          Window: <span className="font-semibold text-amber-200">{poNewOrdersMetrics.windowLabel}</span> — Order No. pending
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowNewOrdersNotif(false)}
+                        className="text-slate-400 hover:text-white p-1 rounded cursor-pointer"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="p-2.5 bg-amber-50/70 border-b border-amber-200 flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setActiveSheetTab('product_order');
+                          setPoSelectedYear('ALL');
+                          setPoSelectedMonth('ALL');
+                          setPoNewOrdersFilterMode(prev => prev === 'LAST_MONTH_TODAY' ? 'NONE' : 'LAST_MONTH_TODAY');
+                          setPoSortOrder('newest');
+                          setPoCurrentPage(1);
+                          setShowNewOrdersNotif(false);
+                        }}
+                        className={`w-full px-3 py-1.5 rounded-lg border text-[11px] font-bold flex items-center justify-between gap-1.5 cursor-pointer transition-colors ${
+                          poNewOrdersFilterMode === 'LAST_MONTH_TODAY'
+                            ? 'bg-amber-600 text-white border-amber-700'
+                            : 'bg-white text-slate-800 border-amber-300 hover:bg-amber-100'
+                        }`}
+                      >
+                        <span>Last Month – Today (Filter Grid)</span>
+                        <span className={`px-2 py-0.2 rounded font-mono ${
+                          poNewOrdersFilterMode === 'LAST_MONTH_TODAY' ? 'bg-white text-amber-800' : 'bg-rose-100 text-rose-800'
+                        }`}>
+                          {poNewOrdersMetrics.totalNewCount} Customers
+                        </span>
+                      </button>
+                    </div>
+
+                    <div className="max-h-72 overflow-y-auto divide-y divide-slate-100">
+                      {poNewOrdersMetrics.totalNewCount === 0 ? (
+                        <div className="py-8 px-4 text-center text-slate-500 text-xs">
+                          <CheckCircle2 className="w-7 h-7 text-emerald-500 mx-auto mb-1.5" />
+                          <p className="font-semibold text-slate-800">All Last Month – Today orders have Order Numbers!</p>
+                          <p className="text-[11px] text-slate-400 mt-0.5">Koi bhi blank Col S customer pending nahi hai.</p>
+                        </div>
+                      ) : (
+                        poNewOrdersMetrics.customerGroups.slice(0, 60).map((group) => {
+                          const primaryRow = group.rows[0];
+                          return (
+                            <button
+                              key={group.customerKey}
+                              type="button"
+                              onClick={() => handleJumpToSingleNewOrder(primaryRow)}
+                              className="w-full text-left px-3 py-2 hover:bg-amber-50/70 transition-colors flex items-start justify-between gap-2 cursor-pointer"
+                            >
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  {group.dayTag === 'TODAY' ? (
+                                    <span className="px-1.5 py-0.2 rounded bg-emerald-600 text-white text-[9px] font-extrabold uppercase shrink-0">
+                                      Today
+                                    </span>
+                                  ) : group.dayTag === 'KAL' ? (
+                                    <span className="px-1.5 py-0.2 rounded bg-sky-600 text-white text-[9px] font-extrabold uppercase shrink-0">
+                                      Kal
+                                    </span>
+                                  ) : (
+                                    <span className="px-1.5 py-0.2 rounded bg-slate-200 text-slate-700 text-[9px] font-bold shrink-0">
+                                      {group.latestDateLabel}
+                                    </span>
+                                  )}
+                                  <span className="font-bold text-slate-900 truncate text-xs">
+                                    {group.customerName}
+                                  </span>
+                                </div>
+                                <div className="text-[11px] text-slate-600 truncate mt-0.5">
+                                  {group.rows.length > 1
+                                    ? `${group.rows.length} Items (${primaryRow.itemName || '—'} + ${group.rows.length - 1} more)`
+                                    : (primaryRow.itemName || '—')}{' '}
+                                  • Total Qty: <span className="font-mono font-semibold text-slate-800">{group.totalQty.toLocaleString()}</span>
+                                  {group.salesPerson ? ` • ${group.salesPerson}` : ''}
+                                </div>
+                              </div>
+                              <span className="shrink-0 px-1.5 py-0.5 rounded bg-amber-100 text-amber-900 border border-amber-300 font-mono text-[10px] font-bold">
+                                {group.rows.length > 1 ? `${group.rows.length} Rows` : `Row #${primaryRow.sheetRowIndex || 'New'}`}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    {poNewOrdersMetrics.totalNewCount > 60 && (
+                      <div className="px-3 py-1.5 bg-slate-50 border-t border-slate-200 text-[10px] text-slate-500 text-center">
+                        Showing latest 60 of {poNewOrdersMetrics.totalNewCount} pending customers — click &quot;Last Month – Today&quot; above to view all in table.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-white border border-slate-300 text-[11px] text-slate-700">
+                <span className={`w-2 h-2 rounded-full ${liveSyncSource === 'live' ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`}></span>
+                <span className="font-semibold">
+                  {liveSyncSource === 'live' ? 'Live Sheet Connected' : 'Local Cache'}
+                </span>
+                {lastSyncedAt && (
+                  <span className="font-mono text-[10px] text-slate-500">({lastSyncedAt})</span>
+                )}
+              </div>
+
+              <button
+                type="button"
+                disabled={isFetchingQueryLive}
+                onClick={() => handleSyncBothLiveSheets(false)}
+                className="px-2.5 py-1 bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-bold rounded-lg shadow-2xs flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Fetch both Product Order & Product Automation live from Google Sheet"
+              >
+                {isFetchingQueryLive ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                <span>{isFetchingQueryLive ? 'Syncing...' : 'Sync Live Sheet'}</span>
+              </button>
+            </div>
+          );
+        })()}
       </div>
 
       {/* SPREADSHEET TOOLBAR & CONTROLS */}
       <div className="bg-white rounded-xl border border-slate-300 shadow-xs overflow-hidden">
-        {/* Top Control Bar - ALL IN ONE SINGLE LINE WITH VISIBLE HORIZONTAL SCROLL */}
+        {/* Row 2 Control Bar - ALL IN ONE SINGLE LINE WITH VISIBLE HORIZONTAL SCROLL */}
         <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between gap-2 overflow-x-auto select-none fms-sheet-scroll whitespace-nowrap">
           {/* Left Controls Group in Single Line */}
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 shrink-0">
             {/* Search Box with Customer Name / Order Number Basis Selector (All Tabs) */}
             <div className="flex items-center bg-white border border-slate-300 rounded-md focus-within:ring-1 focus-within:ring-emerald-500 overflow-hidden shrink-0">
               <select
@@ -3524,7 +3782,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                 <option value="order_no">Order Number</option>
                 <option value="all">All Columns</option>
               </select>
-              <div className="relative w-44 sm:w-56">
+              <div className="relative w-36 sm:w-48">
                 <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
                   type="text"
@@ -3560,6 +3818,110 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               </div>
             </div>
 
+            {/* Product Order Year / Month / Sort / Freeze Controls on Row 2 */}
+            {activeSheetTab === 'product_order' && (() => {
+              const availableYears = extractAvailableYears(rawResponses);
+              return (
+                <>
+                  {/* Year Filter Dropdown */}
+                  <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs shrink-0">
+                    <Calendar className="w-3.5 h-3.5 text-slate-400" />
+                    <span className="text-slate-500 text-[11px] font-medium">Year:</span>
+                    <select
+                      value={poSelectedYear}
+                      onChange={(e) => {
+                        setPoSelectedYear(e.target.value);
+                        setPoNewOrdersFilterMode('NONE');
+                        setPoCurrentPage(1);
+                      }}
+                      className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
+                    >
+                      <option value="ALL">All Years</option>
+                      {availableYears.map(yr => (
+                        <option key={yr} value={yr}>{yr}</option>
+                      ))}
+                    </select>
+                  </div>
+
+                  {/* Month Filter Dropdown */}
+                  <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs shrink-0">
+                    <span className="text-slate-500 text-[11px] font-medium">Month:</span>
+                    <select
+                      value={poSelectedMonth}
+                      onChange={(e) => {
+                        setPoSelectedMonth(e.target.value);
+                        setPoNewOrdersFilterMode('NONE');
+                        setPoCurrentPage(1);
+                      }}
+                      className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
+                    >
+                      <option value="ALL">All Months</option>
+                      <option value="1">Jan (01)</option>
+                      <option value="2">Feb (02)</option>
+                      <option value="3">Mar (03)</option>
+                      <option value="4">Apr (04)</option>
+                      <option value="5">May (05)</option>
+                      <option value="6">Jun (06)</option>
+                      <option value="7">Jul (07)</option>
+                      <option value="8">Aug (08)</option>
+                      <option value="9">Sep (09)</option>
+                      <option value="10">Oct (10)</option>
+                      <option value="11">Nov (11)</option>
+                      <option value="12">Dec (12)</option>
+                    </select>
+                  </div>
+
+                  {/* Sort Mode Selector */}
+                  <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-2 py-0.5 shadow-2xs shrink-0">
+                    <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
+                    <select
+                      value={poSortOrder}
+                      onChange={(e) => {
+                        setPoSortOrder(e.target.value as ProductOrderSortOrder);
+                        setPoCurrentPage(1);
+                      }}
+                      className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs"
+                    >
+                      <option value="newest">Newest Sheet Rows First</option>
+                      <option value="pending">Pending Order No First</option>
+                      <option value="sheet">Sheet Row Order (Old → New)</option>
+                    </select>
+                  </div>
+
+                  {/* Freeze / Unfreeze Controls */}
+                  <div className="flex items-center gap-1 bg-white border border-slate-300 rounded-lg px-1.5 py-0.5 shadow-2xs shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setPoFreezeUpTo(prev => (prev === 'NONE' ? poLastFreezeTarget : 'NONE'))}
+                      className={`px-2 py-0.5 rounded font-bold text-[11px] flex items-center gap-1 transition-colors cursor-pointer ${
+                        poFreezeUpTo !== 'NONE'
+                          ? 'bg-sky-700 text-white hover:bg-sky-800'
+                          : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                      }`}
+                      title={poFreezeUpTo !== 'NONE' ? 'Click to Unfreeze all columns' : 'Click to Freeze columns'}
+                    >
+                      <Pin className="w-3 h-3" />
+                      <span>{poFreezeUpTo !== 'NONE' ? 'Freeze ON' : 'Unfrozen'}</span>
+                    </button>
+                    <select
+                      value={poFreezeUpTo}
+                      onChange={(e) => setPoFreezeUpTo(e.target.value as ProductOrderFreezeTarget)}
+                      className="bg-transparent font-semibold text-slate-800 focus:outline-none cursor-pointer text-xs pr-1"
+                      title="Select which column to freeze up to"
+                    >
+                      <option value="NONE">Unfreeze All</option>
+                      <option value="#">Freeze # Only</option>
+                      <option value="A">Freeze up to Col A</option>
+                      <option value="B">Freeze up to Col B</option>
+                      <option value="C">Freeze up to Col C</option>
+                      <option value="D">Freeze up to Col D</option>
+                      <option value="E">Freeze up to Col E</option>
+                    </select>
+                  </div>
+                </>
+              );
+            })()}
+
             {/* Quick Status Filter (Contextual for Automation / Closed) */}
             {activeSheetTab === 'automation' && (
               <div className="flex items-center gap-1 text-xs shrink-0">
@@ -3585,13 +3947,6 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                 <span>Showing Col AM = &quot;Complete&quot; Only ({closedOrdersCount} Records)</span>
               </div>
             )}
-
-            {/* ONLY Order Status Badge */}
-            <div className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-sky-50 border border-sky-200 text-sky-950 text-xs shadow-2xs shrink-0">
-              <span className="w-1.5 h-1.5 rounded-full bg-sky-500 animate-pulse"></span>
-              <span className="text-[11px] font-bold text-sky-800">Order Status :</span>
-              <span className="font-mono font-bold text-xs">{activeOrdersCount} Open / {closedOrdersCount} Complete</span>
-            </div>
 
             {/* Clear active filters button */}
             {Object.keys(colFilters).length > 0 && (
@@ -3637,6 +3992,27 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               </div>
             )}
 
+            {/* Quick Restore Button when individual columns are hidden in Product Order */}
+            {activeSheetTab === 'product_order' && (() => {
+              const hiddenCount = productOrderColumns.filter(c => visibleCols[c.colLetter] === false).length;
+              if (hiddenCount <= 0) return null;
+              return (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const all: Record<string, boolean> = {};
+                    productOrderColumns.forEach(c => { all[c.colLetter] = true; });
+                    setVisibleColsByTab(prev => ({ ...prev, product_order: all }));
+                  }}
+                  className="px-2 py-1 rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 text-[11px] font-bold flex items-center gap-1 cursor-pointer shrink-0"
+                  title="Show all hidden columns in Product Order"
+                >
+                  <Eye className="w-3 h-3" />
+                  <span>Unhide All ({hiddenCount})</span>
+                </button>
+              );
+            })()}
+
             {/* Columns Hide / Show Button (Per Active Tab) */}
             <button
               onClick={() => setShowColManager(true)}
@@ -3678,22 +4054,6 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             >
               <RotateCcw className="w-3.5 h-3.5" />
             </button>
-
-            {/* FULL SIZE ON BUTTON IN THE FAR RIGHT CORNER */}
-            {setIsFullWidth && (
-              <button
-                onClick={() => setIsFullWidth(!isFullWidth)}
-                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-bold transition-all shadow-xs shrink-0 ${
-                  isFullWidth
-                    ? 'bg-emerald-700 text-white border-emerald-800 hover:bg-emerald-800'
-                    : 'bg-white text-slate-800 border-slate-300 hover:bg-slate-100'
-                }`}
-                title={isFullWidth ? "Click for Boxed View" : "Click for Full Screen View"}
-              >
-                {isFullWidth ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
-                <span>{isFullWidth ? 'Full Size ON' : 'Full Size OFF'}</span>
-              </button>
-            )}
           </div>
         </div>
 
@@ -3778,12 +4138,22 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
             webAppConfigured={Boolean(webAppUrl)}
             onOpenTwoWaySyncModal={() => setShowTwoWaySyncModal(true)}
             onOpenColumnManager={() => setShowColManager(true)}
+            newOrdersFilterMode={poNewOrdersFilterMode}
+            selectedYear={poSelectedYear}
+            selectedMonth={poSelectedMonth}
+            sortOrder={poSortOrder}
+            freezeUpTo={poFreezeUpTo}
+            currentPage={poCurrentPage}
+            setCurrentPage={setPoCurrentPage}
+            pageSize={poPageSize}
+            setPageSize={setPoPageSize}
+            highlightedOrderId={poHighlightedOrderId}
             onHideColumn={(colLetter) => {
               setVisibleColsByTab(prev => ({
                 ...prev,
                 product_order: { ...prev.product_order, [colLetter]: false }
               }));
-              setSyncFeedback(`Column ${colLetter} hidden in Product Order. Click "Hide / Show Columns" or "Unhide All" to restore.`);
+              setSyncFeedback(`Column ${colLetter} hidden in Product Order. Click "Columns" above or "Unhide All" to restore.`);
               setTimeout(() => setSyncFeedback(null), 3000);
             }}
             onShowAllColumns={() => {
@@ -3796,7 +4166,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
           <div
             ref={tableScrollRef}
             onScroll={handleTableScroll}
-            className={`overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-140px)] max-h-[89vh]' : 'h-[640px] max-h-[74vh]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}
+            className={`w-full max-w-full overflow-x-auto overflow-y-auto ${isFullWidth ? 'h-[calc(100vh-140px)] max-h-[89vh] min-h-[320px]' : 'h-[min(640px,calc(100vh-190px))] min-h-[320px]'} select-text relative fms-sheet-scroll border border-slate-300 rounded-lg shadow-inner bg-white`}
           >
             <table className="table-auto w-max min-w-full border-collapse text-xs text-left">
             {/* The Sticky Column Letters Header with Rich Fill Colors */}

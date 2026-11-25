@@ -19,8 +19,10 @@ import {
   Terminal,
   HelpCircle,
   Settings,
-  ChevronDown
+  ChevronDown,
+  Link2
 } from 'lucide-react';
+import { WEB_APP_URL_STORAGE_KEY, DEFAULT_WEB_APP_URL } from '../utils/googleQueryFetcher';
 
 interface HeaderProps {
   activeTab: 'simulator' | 'code' | 'firebase' | 'advisor' | 'columns' | 'guide';
@@ -29,6 +31,7 @@ interface HeaderProps {
   copied: boolean;
   isFullWidth: boolean;
   setIsFullWidth: (val: boolean) => void;
+  onOpenTwoWaySync?: () => void;
 }
 
 export interface ConnectedUser {
@@ -48,7 +51,8 @@ export const Header: React.FC<HeaderProps> = ({
   onCopyCode,
   copied,
   isFullWidth,
-  setIsFullWidth
+  setIsFullWidth,
+  onOpenTwoWaySync
 }) => {
   // Current Logged-in Google User
   const [currentUser, setCurrentUser] = useState(() => {
@@ -160,16 +164,16 @@ export const Header: React.FC<HeaderProps> = ({
       {/* 1. SLIM CLEAN HEADER */}
       <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-2xs">
         <div className={`mx-auto transition-all ${isFullWidth ? 'px-2 sm:px-4' : 'max-w-7xl px-3 sm:px-4'}`}>
-          <div className="flex items-center justify-between gap-3 h-11">
+          <div className="flex items-center justify-between gap-2 sm:gap-3 h-11 min-w-0">
             {/* Zone 1: Wordmark & Logo */}
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 min-w-0 flex-1">
               <button
                 type="button"
                 onClick={() => {
                   setActiveTab('simulator');
                   setShowSettingsMenu(false);
                 }}
-                className="flex items-center gap-2.5 hover:opacity-90 transition-opacity cursor-pointer"
+                className="flex items-center gap-2 hover:opacity-90 transition-opacity cursor-pointer min-w-0 max-w-full"
                 title="Back to Sheet Workspace"
               >
                 <img
@@ -177,15 +181,15 @@ export const Header: React.FC<HeaderProps> = ({
                   alt="Ginza Logo"
                   className="h-7 w-auto object-contain rounded border border-slate-200 bg-white px-1 py-0.5 shadow-2xs shrink-0"
                 />
-                <span className="text-xs sm:text-sm font-bold tracking-tight text-slate-900 whitespace-nowrap">
+                <span className="text-xs sm:text-sm font-bold tracking-tight text-slate-900 truncate">
                   Ginza Mumbai Master Orders Portal
                 </span>
               </button>
-              <span className="hidden xl:inline-block text-[10px] font-semibold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
+              <span className="hidden xl:inline-block shrink-0 text-[10px] font-semibold px-1.5 py-0.2 rounded bg-emerald-100 text-emerald-800 border border-emerald-200">
                 Live Sheet Sync
               </span>
               {activeTab !== 'simulator' && (
-                <span className="text-[11px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
+                <span className="hidden sm:inline-block shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 border border-slate-200">
                   {activeTab === 'firebase' && 'Firebase Sync'}
                   {activeTab === 'advisor' && 'Supabase SQL'}
                   {activeTab === 'code' && 'GAS Code'}
@@ -196,7 +200,7 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
 
             {/* Zone 2 & 3: Settings Menu, Full Size Toggle & Google User Profile */}
-            <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
               {/* Settings Dropdown Menu */}
               <div className="relative">
                 <button
@@ -242,6 +246,36 @@ export const Header: React.FC<HeaderProps> = ({
                         <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
                         <span>Sheet Workspace</span>
                       </button>
+                      {onOpenTwoWaySync && (() => {
+                        let hasWebAppUrl = Boolean(DEFAULT_WEB_APP_URL);
+                        try {
+                          const saved = localStorage.getItem(WEB_APP_URL_STORAGE_KEY);
+                          if (saved !== null) hasWebAppUrl = saved.trim().length > 0;
+                        } catch {}
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onOpenTwoWaySync();
+                              setShowSettingsMenu(false);
+                            }}
+                            className="w-full text-left px-2.5 py-2 rounded-lg font-semibold flex items-center justify-between gap-2 transition-colors cursor-pointer text-slate-700 hover:bg-emerald-50 hover:text-emerald-900"
+                            title="Configure or view Google Apps Script 2-Way Sheet Write deployment URL"
+                          >
+                            <span className="flex items-center gap-2">
+                              <Link2 className="w-4 h-4 text-emerald-600" />
+                              <span>2-Way Sheet Write</span>
+                            </span>
+                            <span className={`text-[10px] font-bold px-1.5 py-0.2 rounded ${
+                              hasWebAppUrl
+                                ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                : 'bg-amber-100 text-amber-800 border border-amber-200'
+                            }`}>
+                              {hasWebAppUrl ? 'ON ✓' : 'Setup'}
+                            </span>
+                          </button>
+                        );
+                      })()}
                       <button
                         type="button"
                         onClick={() => {
