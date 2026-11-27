@@ -309,14 +309,18 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
   // Dataset 2: "Product Automation" + "Closed Orders" tabs (Cols A to AQ, gid=1541274744)
   const [automationRows, setAutomationRows] = useState<ProductOrderRow[]>([]);
+  const [isAutomationHydrated, setIsAutomationHydrated] = useState<boolean>(false);
 
   const rawResponsesRef = useRef(rawResponses);
   rawResponsesRef.current = rawResponses;
   const automationRowsRef = useRef(automationRows);
   automationRowsRef.current = automationRows;
+  // Track rows promoted in the current session so they survive briefly until reflected in Google Sheet
+  const recentLocalPromotedRef = useRef<Array<{ row: ProductOrderRow; promotedAt: number }>>([]);
+  const liveSyncCompletedRef = useRef<boolean>(false);
 
   // Hydrate operational columns (W..AN, U Dispatch) from Product Automation sheet rows
-  const hydrateFromAutomationRows = (rows: ProductOrderRow[], resetStale = false) => {
+  const hydrateFromAutomationRows = (rows: ProductOrderRow[], replaceFromSheet = false) => {
     const nextW: Record<string, string> = {};
     const nextX: Record<string, string> = {};
     const nextAA: Record<string, string> = {};
@@ -362,25 +366,45 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
       }
     });
 
-    if (resetStale) {
-      if (Object.keys(nextW).length > 0) setColWStatuses(prev => ({ ...prev, ...nextW }));
-      if (Object.keys(nextX).length > 0) setColXRemarks(prev => ({ ...prev, ...nextX }));
-      if (Object.keys(nextAA).length > 0) setColMailAAStatuses(prev => ({ ...prev, ...nextAA }));
-      if (Object.keys(nextAB).length > 0) setColMailABStatuses(prev => ({ ...prev, ...nextAB }));
-      if (Object.keys(nextAC).length > 0) setAcStatuses(prev => ({ ...prev, ...nextAC }));
-      if (Object.keys(nextAE).length > 0) setColAEChecks(prev => ({ ...prev, ...nextAE }));
-      if (Object.keys(nextAF).length > 0) setColAFTimestamps(prev => ({ ...prev, ...nextAF }));
-      if (Object.keys(nextAG).length > 0) setColAGRemarks(prev => ({ ...prev, ...nextAG }));
-      if (Object.keys(nextAH).length > 0) setColAHChecks(prev => ({ ...prev, ...nextAH }));
-      if (Object.keys(nextAI).length > 0) setColAITimestamps(prev => ({ ...prev, ...nextAI }));
-      if (Object.keys(nextAJ).length > 0) setColAJRemarks(prev => ({ ...prev, ...nextAJ }));
-      if (Object.keys(nextAL).length > 0) setLrNumbers(prev => ({ ...prev, ...nextAL }));
-      if (Object.keys(nextAN).length > 0) setAnStatuses(prev => ({ ...prev, ...nextAN }));
-      if (Object.keys(nextAP).length > 0) setColAPStatuses(prev => ({ ...prev, ...nextAP }));
-      if (Object.keys(nextAQ).length > 0) setColAQStatuses(prev => ({ ...prev, ...nextAQ }));
-      if (Object.keys(nextT).length > 0) setColTEmails(prev => ({ ...prev, ...nextT }));
-      if (Object.keys(nextAK).length > 0) setColAKTransporters(prev => ({ ...prev, ...nextAK }));
-      setDispatchRecords(prev => ({ ...prev, ...nextDispatch }));
+    if (replaceFromSheet) {
+      setColWStatuses(nextW);
+      setColXRemarks(nextX);
+      setColMailAAStatuses(nextAA);
+      setColMailABStatuses(nextAB);
+      setAcStatuses(nextAC);
+      setColAEChecks(nextAE);
+      setColAFTimestamps(nextAF);
+      setColAGRemarks(nextAG);
+      setColAHChecks(nextAH);
+      setColAITimestamps(nextAI);
+      setColAJRemarks(nextAJ);
+      setLrNumbers(nextAL);
+      setAnStatuses(nextAN);
+      setColAPStatuses(nextAP);
+      setColAQStatuses(nextAQ);
+      setColTEmails(nextT);
+      setColAKTransporters(nextAK);
+      setDispatchRecords(nextDispatch);
+      try {
+        localStorage.setItem(LOCAL_STORAGE_COL_W_KEY, JSON.stringify(nextW));
+        localStorage.setItem(LOCAL_STORAGE_COL_X_KEY, JSON.stringify(nextX));
+        localStorage.setItem(LOCAL_STORAGE_COL_AA_KEY, JSON.stringify(nextAA));
+        localStorage.setItem(LOCAL_STORAGE_COL_AB_KEY, JSON.stringify(nextAB));
+        localStorage.setItem(LOCAL_STORAGE_CONFIRM_KEY, JSON.stringify(nextAC));
+        localStorage.setItem(LOCAL_STORAGE_COL_AE_KEY, JSON.stringify(nextAE));
+        localStorage.setItem(LOCAL_STORAGE_COL_AF_KEY, JSON.stringify(nextAF));
+        localStorage.setItem(LOCAL_STORAGE_COL_AG_KEY, JSON.stringify(nextAG));
+        localStorage.setItem(LOCAL_STORAGE_COL_AH_KEY, JSON.stringify(nextAH));
+        localStorage.setItem(LOCAL_STORAGE_COL_AI_KEY, JSON.stringify(nextAI));
+        localStorage.setItem(LOCAL_STORAGE_COL_AJ_KEY, JSON.stringify(nextAJ));
+        localStorage.setItem(LOCAL_STORAGE_COL_AL_KEY, JSON.stringify(nextAL));
+        localStorage.setItem(LOCAL_STORAGE_DISPATCH_WA_KEY, JSON.stringify(nextAN));
+        localStorage.setItem(LOCAL_STORAGE_COL_AP_KEY, JSON.stringify(nextAP));
+        localStorage.setItem(LOCAL_STORAGE_COL_AQ_KEY, JSON.stringify(nextAQ));
+        localStorage.setItem(LOCAL_STORAGE_COL_T_KEY, JSON.stringify(nextT));
+        localStorage.setItem(LOCAL_STORAGE_COL_AK_KEY, JSON.stringify(nextAK));
+        localStorage.setItem(LOCAL_STORAGE_DISPATCH_KEY, JSON.stringify(nextDispatch));
+      } catch {}
     }
   };
 
@@ -423,36 +447,66 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         saveOrdersToStorage(mergedPO);
       }
 
-      // 2. Merge Product Automation (keep newly assigned local orders not yet copied to PA sheet)
+      // 2. Product Automation: Live Google Sheet is the single source of truth across all systems.
+      // Only keep brand-new rows promoted in the current session (<90s ago) that are not yet in the live sheet.
       if (res.automationRows && res.automationRows.length > 0) {
+        const nowTs = Date.now();
         const remoteOrderNos = new Set(
           res.automationRows
             .map(r => (r.orderNo || '').trim().toLowerCase())
             .filter(Boolean)
         );
-        const localOnlyOrders = automationRowsRef.current.filter(
-          r => r.orderNo && r.orderNo.trim() !== '' && !remoteOrderNos.has(r.orderNo.trim().toLowerCase())
+        const remoteFingerprints = new Set(
+          res.automationRows.map(
+            r => `${(r.timestamp || '').trim()}___${(r.customerName || '').trim().toLowerCase()}___${(r.itemName || '').replace(/^\d+\)\s*/, '').trim().toLowerCase()}`
+          )
         );
 
-        const mergedPA = [...res.automationRows, ...localOnlyOrders];
+        recentLocalPromotedRef.current = recentLocalPromotedRef.current.filter(({ row, promotedAt }) => {
+          if (nowTs - promotedAt > 90000) return false;
+          const ord = (row.orderNo || '').trim().toLowerCase();
+          const fp = `${(row.timestamp || '').trim()}___${(row.customerName || '').trim().toLowerCase()}___${(row.itemName || '').replace(/^\d+\)\s*/, '').trim().toLowerCase()}`;
+          return (!ord || !remoteOrderNos.has(ord)) && !remoteFingerprints.has(fp);
+        });
+
+        const pendingRecentRows = recentLocalPromotedRef.current.map(item => item.row);
+        const mergedPA = [...res.automationRows, ...pendingRecentRows];
+        liveSyncCompletedRef.current = true;
         setAutomationRows(mergedPA);
         saveAutomationOrdersToStorage(mergedPA);
         hydrateFromAutomationRows(res.automationRows, true);
+        setIsAutomationHydrated(true);
+      } else {
+        setIsAutomationHydrated(true);
       }
 
+      fetchDispatchHistoryFromFirebase();
       setLastSyncedAt(res.fetchedAt);
       setLiveSyncSource(res.source);
 
       if (!silent) {
-        const openCount = res.automationRows.filter(r => !isItemComplete(r.statusAN)).length;
-        const completeCount = res.automationRows.filter(r => isItemComplete(r.statusAN)).length;
+        // Group res.automationRows identically to Product Automation / Closed Orders tabs so every count matches 100%
+        const groupedStatusMap = new Map<string, boolean>();
+        res.automationRows.forEach(r => {
+          const gk = buildOrderGroupKey(r);
+          const prevComplete = groupedStatusMap.get(gk) || false;
+          groupedStatusMap.set(gk, prevComplete || isItemComplete(r.statusAN));
+        });
+        let openOrderGroups = 0;
+        let closedOrderGroups = 0;
+        groupedStatusMap.forEach(isComp => {
+          if (isComp) closedOrderGroups += 1;
+          else openOrderGroups += 1;
+        });
+
         setSyncFeedbackTone('success');
         setSyncFeedback(
-          `✓ Live Google Sheet synced at ${res.fetchedAt} | Product Order: ${res.productOrderRows.length.toLocaleString()} rows | Automation Open: ${openCount} | Closed (AM Complete): ${completeCount}`
+          `✓ Live Google Sheet synced at ${res.fetchedAt} | Product Order: ${res.productOrderRows.length.toLocaleString()} rows | Product Automation: ${openOrderGroups} Open | Closed Orders: ${closedOrderGroups.toLocaleString()}`
         );
       }
     } catch (err: any) {
       console.error('Failed to sync live sheets:', err);
+      setIsAutomationHydrated(true);
       if (!silent) {
         setSyncFeedbackTone('warning');
         setSyncFeedback(`Live sync warning: ${err?.message || 'Check network connection'}`);
@@ -470,21 +524,21 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     purgeAllLegacyStorageAndCaches();
 
     loadOrdersFromStorage().then((saved) => {
-      if (saved && Array.isArray(saved) && saved.length > 0 && !hasDelhiDummyData(saved)) {
+      if (!liveSyncCompletedRef.current && saved && Array.isArray(saved) && saved.length > 0 && !hasDelhiDummyData(saved)) {
         setRawResponses(saved);
       }
     });
 
     loadAutomationOrdersFromStorage().then((savedAuto) => {
-      if (savedAuto && Array.isArray(savedAuto) && savedAuto.length > 0) {
+      if (!liveSyncCompletedRef.current && savedAuto && Array.isArray(savedAuto) && savedAuto.length > 0) {
         setAutomationRows(savedAuto);
         hydrateFromAutomationRows(savedAuto, true);
+        setIsAutomationHydrated(true);
       }
     });
 
     // Auto-fetch live Google Sheet ("Product Order" + "Product Automation") + Firebase /dispatch_history immediately
     handleSyncBothLiveSheets(true);
-    fetchDispatchHistoryFromFirebase();
   }, []);
 
   // Periodic background centralization sync every 60s
@@ -1054,6 +1108,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
   // Group Product Automation rows into distinct orders (sorted newest Google Sheet rows first)
   const groupedOrders: GroupedOrder[] = useMemo(() => {
+    if (automationRows.length === 0 && !isAutomationHydrated) {
+      return [];
+    }
     const sourceForAutomation = automationRows.length > 0
       ? automationRows
       : rawResponses.filter(r => r.orderNo && r.orderNo.trim() !== '');
@@ -1140,26 +1197,28 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         : (Number(row.dispatchQty) || 0);
       const balance = Number((row.qty - dispatch).toFixed(4));
 
-      map[orderKey].items.push({
-        id: row.orderId,
-        unit: row.unit,
-        itemName: row.itemName,
-        color: row.color,
-        width: row.width,
-        unitOfItem: row.unitOfItem,
-        qty: row.qty,
-        rate: row.rate,
-        discount: row.discount,
-        deliveryDate: row.deliveryDate,
-        dispatchQty: dispatch,
-        balanceQty: balance,
-        statusAN: (isItemComplete(row.statusAN) ? 'Complete' : (row.statusAN as any)) || 'Open'
-      });
+      if (!map[orderKey].items.some(existing => existing.id === row.orderId)) {
+        map[orderKey].items.push({
+          id: row.orderId,
+          unit: row.unit,
+          itemName: row.itemName,
+          color: row.color,
+          width: row.width,
+          unitOfItem: row.unitOfItem,
+          qty: row.qty,
+          rate: row.rate,
+          discount: row.discount,
+          deliveryDate: row.deliveryDate,
+          dispatchQty: dispatch,
+          balanceQty: balance,
+          statusAN: (isItemComplete(row.statusAN) ? 'Complete' : (row.statusAN as any)) || 'Open'
+        });
+      }
     });
 
     // Show newest Google Sheet orders on Page 1 first
     return Object.values(map).sort((a, b) => (b._maxRow ?? 0) - (a._maxRow ?? 0));
-  }, [automationRows, rawResponses, dispatchRecords, dispatchHistoryMap]);
+  }, [automationRows, isAutomationHydrated, rawResponses, dispatchRecords, dispatchHistoryMap]);
 
   // Handle Status AM Dropdown Change: 'Open' | 'In-Progress' | 'Complete'
   const handleItemStatusChange = async (orderId: string, newStatus: 'Open' | 'In-Progress' | 'Closed' | 'Complete') => {
@@ -1739,6 +1798,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         balanceQty: targetRow.balanceQty ?? targetRow.qty
       };
 
+      recentLocalPromotedRef.current.push({ row: promotedRow, promotedAt: Date.now() });
       setAutomationRows(prev => {
         const existsIdx = prev.findIndex(r => r.orderId === orderId || (r.orderGroupKey && r.orderGroupKey === newGroupKey));
         const nextAuto = existsIdx >= 0
@@ -1768,12 +1828,12 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         setSyncFeedback(`✓ Order No "${generatedNo}" (${affectedItem}) saved in App + Google Sheet Col S! (${writeRes.message})`);
       } else {
         setSyncFeedbackTone('error');
-        setSyncFeedback(`⚠️ App me save hua, lekin Google Sheet write failed: ${writeRes.message}`);
+        setSyncFeedback(`⚠️ Saved in App, but Google Sheet write failed: ${writeRes.message}`);
       }
     } else {
       setSyncFeedbackTone('warning');
       setSyncFeedback(
-        `⚠️ Order No "${generatedNo}" sirf App me save hua hai! Google Sheet "Product Order" Col S me save karne ke liye "2-Way Sheet Setup" URL add karein.`
+        `⚠️ Order No "${generatedNo}" saved in App only! Configure the "2-Way Sheet Write" Web App URL in Settings to save directly to Google Sheet Col S.`
       );
     }
   };
@@ -1807,6 +1867,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     );
 
     if (newlyPromoted.length > 0) {
+      const nowMs = Date.now();
+      newlyPromoted.forEach(row => recentLocalPromotedRef.current.push({ row, promotedAt: nowMs }));
       setAutomationRows(prev => [...newlyPromoted, ...prev]);
     }
 
@@ -1820,14 +1882,13 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
   const handleAddNewProductOrderRow = async (newRow: ProductOrderRow) => {
     setRawResponses(prev => [newRow, ...prev]);
     if (newRow.orderNo && newRow.orderNo.trim() !== '') {
-      setAutomationRows(prev => [
-        {
-          ...newRow,
-          orderGroupKey: [newRow.orderNo, newRow.customerName, newRow.orderDate].map(v => (v || '').trim()).join('_'),
-          statusAN: 'Open'
-        },
-        ...prev
-      ]);
+      const promotedNew: ProductOrderRow = {
+        ...newRow,
+        orderGroupKey: [newRow.orderNo, newRow.customerName, newRow.orderDate].map(v => (v || '').trim()).join('_'),
+        statusAN: 'Open'
+      };
+      recentLocalPromotedRef.current.push({ row: promotedNew, promotedAt: Date.now() });
+      setAutomationRows(prev => [promotedNew, ...prev]);
     }
 
     let sheetNote = '';
@@ -1901,11 +1962,11 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         setSyncFeedback(
           writeRes.ok
             ? `✓ Order No for ${editingOrderNo.po || matchedRow?.customerName} set to "${newVal}" in App + Google Sheet Col S!`
-            : `⚠️ App me save hua, Google Sheet write error: ${writeRes.message}`
+            : `⚠️ Saved in App, Google Sheet write error: ${writeRes.message}`
         );
       } else {
         setSyncFeedbackTone('warning');
-        setSyncFeedback(`⚠️ Order No "${newVal}" sirf App me save hua! Google Sheet Col S write-back ke liye "2-Way Sheet Setup" karein.`);
+        setSyncFeedback(`⚠️ Order No "${newVal}" saved in App only! Configure "2-Way Sheet Write" in Settings for Google Sheet Col S write-back.`);
       }
     } else {
       setSyncFeedbackTone('success');
@@ -2066,7 +2127,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         setSyncFeedback(`✓ Customer Mail Id updated to "${cleanEmail || '—'}" in Col T & Google Sheet.`);
       } else if ((writeRes.message || '').includes('Unknown action')) {
         setSyncFeedbackTone('success');
-        setSyncFeedback(`✓ Customer Mail Id "${cleanEmail || '—'}" saved in App. (Sheet Col T sync ke liye 2-Way Apps Script update karein)`);
+        setSyncFeedback(`✓ Customer Mail Id "${cleanEmail || '—'}" saved in App. (Update the 2-Way Apps Script in Settings to sync Col T with Google Sheet)`);
       } else {
         setSyncFeedbackTone('warning');
         setSyncFeedback(`Saved in App. Google Sheet sync note: ${writeRes.message}`);
@@ -2197,7 +2258,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     // Check Web App URL before attempting email send
     if (!webAppUrl || !webAppUrl.trim().startsWith('https://script.google.com/')) {
       setSyncFeedbackTone('warning');
-      setSyncFeedback('⚠️ 2-Way Web App URL set nahi hai. Mail bhejne ke liye "2-Way Sheet Write" me URL save karein.');
+      setSyncFeedback('⚠️ 2-Way Web App URL is not configured. Save the Web App URL in Settings > "2-Way Sheet Write" to send emails.');
       setShowTwoWaySyncModal(true);
       setTimeout(() => setSyncFeedback(null), 5000);
       return;
@@ -2272,7 +2333,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         return next;
       });
       setSyncFeedbackTone('warning');
-      setSyncFeedback('⚠️ Apps Script me naya Mail Confirmation code update karke New Deployment karein ("2-Way Sheet Write" se code copy karein).');
+      setSyncFeedback('⚠️ Please update your Google Apps Script with the latest Mail Confirmation code (copy from Settings > "2-Way Sheet Write") and create a New Deployment.');
       setShowTwoWaySyncModal(true);
       setTimeout(() => setSyncFeedback(null), 8000);
     } else {
@@ -2320,7 +2381,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         return next;
       });
       setSyncFeedbackTone('success');
-      setSyncFeedback(`✅ Gmail Draft already exists for ${order.customerName}. Col AQ link par click karke open karein!`);
+      setSyncFeedback(`✅ Gmail Draft already exists for ${order.customerName}. Click the link in Col AQ to open it!`);
       setTimeout(() => setSyncFeedback(null), 4000);
       return;
     }
@@ -2362,7 +2423,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
 
     if (!webAppUrl || !webAppUrl.trim().startsWith('https://script.google.com/')) {
       setSyncFeedbackTone('warning');
-      setSyncFeedback('⚠️ 2-Way Web App URL set nahi hai. Gmail Draft create karne ke liye "2-Way Sheet Write" me URL save karein.');
+      setSyncFeedback('⚠️ 2-Way Web App URL is not configured. Save the Web App URL in Settings > "2-Way Sheet Write" to create Gmail drafts.');
       setShowTwoWaySyncModal(true);
       setTimeout(() => setSyncFeedback(null), 5000);
       return;
@@ -2426,7 +2487,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         prev.map(r => (buildOrderGroupKey(r) === gk ? { ...r, deliveryEmail: 'Sent', deliveryEmailStatus: finalDraftStatus } : r))
       );
       setSyncFeedbackTone('success');
-      setSyncFeedback(`✅ Draft Created in Gmail for ${order.customerName}! Col AQ link par click karke Gmail Draft open karein.`);
+      setSyncFeedback(`✅ Draft Created in Gmail for ${order.customerName}! Click the link in Col AQ to open the Gmail Draft.`);
       setTimeout(() => setSyncFeedback(null), 6000);
     } else if ((writeRes.message || '').includes('Unknown action')) {
       setColAPStatuses(prev => {
@@ -2440,7 +2501,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
         return next;
       });
       setSyncFeedbackTone('warning');
-      setSyncFeedback('⚠️ Delivery Email Draft ke liye "2-Way Sheet Write" se updated Apps Script copy karke Google Sheet me New Deployment karein.');
+      setSyncFeedback('⚠️ Please copy the updated Apps Script from Settings > "2-Way Sheet Write" and create a New Deployment to enable Delivery Email Gmail drafts.');
       setShowTwoWaySyncModal(true);
       setTimeout(() => setSyncFeedback(null), 8000);
     } else {
@@ -3383,10 +3444,13 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
     };
   }, [activeSheetTab, visibleCols, viewMode, isFullWidth, statusFilter, automationPage, automationPageSize]);
 
-  // Aggregate metrics
+  // Aggregate metrics (all computed from the exact same isOrderComplete predicate so counts never mismatch)
   const totalOrdersCount = groupedOrders.length;
   const closedOrdersCount = groupedOrders.filter(o => isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN))).length;
-  const activeOrdersCount = groupedOrders.filter(o => !(isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN)))).length;
+  const activeOpenOrders = groupedOrders.filter(o => !(isItemComplete(o.statusAN) || o.items.some(it => isItemComplete(it.statusAN))));
+  const activeOrdersCount = activeOpenOrders.length;
+  const openOnlyOrdersCount = activeOpenOrders.filter(o => (o.statusAN || '').toLowerCase() !== 'in-progress').length;
+  const inProgressOrdersCount = activeOpenOrders.filter(o => (o.statusAN || '').toLowerCase() === 'in-progress').length;
 
   // Toggle filter value for a column
   const toggleColFilterValue = (col: string, val: string) => {
@@ -3972,8 +4036,8 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   className="bg-white border border-slate-300 rounded-md px-2 py-1 text-xs font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                 >
                   <option value="ALL">All Open Orders ({activeOrdersCount})</option>
-                  <option value="Open">🔵 Open Only ({groupedOrders.filter(o => !isItemComplete(o.statusAN) && o.statusAN !== 'In-Progress').length})</option>
-                  <option value="In-Progress">🟡 In-Progress Only ({groupedOrders.filter(o => o.statusAN === 'In-Progress').length})</option>
+                  <option value="Open">🔵 Open Only ({openOnlyOrdersCount})</option>
+                  <option value="In-Progress">🟡 In-Progress Only ({inProgressOrdersCount})</option>
                 </select>
               </div>
             )}
@@ -4351,9 +4415,19 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               {filteredOrders.length === 0 ? (
                 <tr>
                   <td colSpan={45} className="text-center py-12 text-slate-500 bg-white">
-                    <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
-                    <p className="font-semibold text-slate-700">No orders match the current filter or search criteria.</p>
-                    <p className="text-xs text-slate-400 mt-1">Try switching tabs below, reset column filters or clear search.</p>
+                    {!isAutomationHydrated ? (
+                      <>
+                        <Loader2 className="w-7 h-7 text-emerald-600 animate-spin mx-auto mb-2" />
+                        <p className="font-semibold text-slate-700">Syncing live orders from Google Sheet...</p>
+                        <p className="text-xs text-slate-400 mt-1">Loading Product Automation &amp; Closed Orders.</p>
+                      </>
+                    ) : (
+                      <>
+                        <AlertCircle className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                        <p className="font-semibold text-slate-700">No orders match the current filter or search criteria.</p>
+                        <p className="text-xs text-slate-400 mt-1">Try resetting column filters or clearing the search box.</p>
+                      </>
+                    )}
                   </td>
                 </tr>
               ) : (
@@ -4425,6 +4499,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                 Showing {automationPageSize === 0 ? 1 : (safeAutomationPage - 1) * automationPageSize + 1}–
                 {automationPageSize === 0 ? filteredOrders.length : Math.min(safeAutomationPage * automationPageSize, filteredOrders.length)} of{' '}
                 <span className="font-bold text-emerald-700">{filteredOrders.length}</span> orders
+                {activeSheetTab === 'automation' && filteredOrders.length !== activeOrdersCount && (
+                  <span className="text-slate-500 font-normal"> (filtered from {activeOrdersCount} open)</span>
+                )}
               </span>
 
               <div className="flex items-center gap-1 ml-2 pl-2 border-l border-slate-300">
@@ -5683,7 +5760,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                   2-Way Google Sheet Centralization (App ⇄ Google Sheet)
                 </h3>
                 <p className="text-[11px] text-emerald-100">
-                  App me Order No (Col S), Dispatch Qnt (Col U), Confirmation Mail (Col AA ➔ AB), Delivery Email Draft (Col AP ➔ AQ Gmail Draft), ya Col AM edit karte hi direct Google Sheet update hoga
+                  Editing Order No (Col S), Dispatch Qty (Col U), Confirmation Mail (Col AA ➔ AB), Delivery Email Draft (Col AP ➔ AQ Gmail Draft), or Col AM in the app immediately updates your live Google Sheet.
                 </p>
               </div>
               <button
@@ -5699,10 +5776,10 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
               <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-950 space-y-1">
                 <span className="font-bold block">How 2-Way Centralization Works:</span>
                 <p className="text-[11px] text-emerald-800 leading-relaxed">
-                  <strong>1) Sheet ➔ App (Already Active ✓):</strong> Google Sheet ke &quot;Product Order&quot; &amp; &quot;Product Automation&quot; tabs me koi bhi Order Number, Dispatch Qnt, ya Col AM status dalein, app me auto-sync ho jata hai.
+                  <strong>1) Sheet ➔ App (Already Active ✓):</strong> Any Order Number, Dispatch Qty, or Col AM status updated in the Google Sheet &quot;Product Order&quot; &amp; &quot;Product Automation&quot; tabs automatically syncs into this app.
                 </p>
                 <p className="text-[11px] text-emerald-800 leading-relaxed">
-                  <strong>2) App ➔ Sheet Write-Back:</strong> Google Sheet me row write karne ke liye neeche diya Apps Script deploy karke apna Web App URL yahan paste karein.
+                  <strong>2) App ➔ Sheet Write-Back:</strong> To enable direct write-back from the app to your Google Sheet, deploy the Apps Script below as a Web App and paste its URL here.
                 </p>
               </div>
 
@@ -5742,7 +5819,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                 />
                 {webAppUrl.trim().endsWith('/dev') && (
                   <p className="text-[11px] text-rose-600 font-semibold">
-                    ⚠️ Aapne &quot;/dev&quot; test URL paste kiya hai. Deploy ➔ New deployment karke &quot;/exec&quot; URL paste karein!
+                    ⚠️ You pasted a &quot;/dev&quot; test URL. Please click Deploy ➔ New deployment and paste the production &quot;/exec&quot; URL!
                   </p>
                 )}
               </div>
@@ -5761,7 +5838,7 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                         setSyncFeedback('✓ 2-Way Apps Script Web App Verified & Connected!');
                       } else {
                         setSyncFeedbackTone('warning');
-                        setSyncFeedback('Web App responded, check spreadsheet permissions.');
+                        setSyncFeedback('Web App responded, please verify spreadsheet permissions.');
                       }
                     } catch (err: any) {
                       setSyncFeedbackTone('error');
@@ -5804,9 +5881,9 @@ export const SpreadsheetSimulator: React.FC<SpreadsheetSimulatorProps> = ({
                       setSyncFeedback(
                         clean
                           ? clean.endsWith('/dev')
-                            ? '⚠️ Warning: "/dev" URL saved. Please replace with "/exec" Web App deployment URL.'
-                            : '✓ 2-Way Google Sheet Write-Back URL Saved! Ab Order No Col S direct Google Sheet me save hoga.'
-                          : '2-Way URL cleared.'
+                            ? '⚠️ Warning: "/dev" URL saved. Please replace it with your production "/exec" Web App deployment URL.'
+                            : '✓ 2-Way Google Sheet Write-Back URL saved! Order No (Col S) and dispatch/mail updates will now sync directly to Google Sheet.'
+                          : '2-Way Web App URL cleared.'
                       );
                       setTimeout(() => setSyncFeedback(null), 5000);
                     }}

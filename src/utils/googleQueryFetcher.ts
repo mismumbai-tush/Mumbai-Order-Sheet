@@ -336,6 +336,9 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
     header.some(h => h.includes('dispatch') || h.includes('balance') || h.includes('open / close'));
   const isRawOrdersForm = !is43ColFormat && (header[2]?.includes('customer') || header[13]?.includes('qty'));
 
+  const seenAutoFingerprints = new Map<string, ProductOrderRow[]>();
+  const autoBlockOrder: string[] = [];
+
   for (let i = 1; i < parsedWithNums.length; i++) {
     const r = parsedWithNums[i].row;
     const sheetRowIndex = parsedWithNums[i].sheetRowIndex; // Exact 1-based Google Sheet row number
@@ -412,6 +415,22 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
       const lineCount = Math.max(1, items.length, qtys.length);
       const orderGroupKey = `PA_R${sheetRowIndex}_${orderNo || timestamp}_${customerName}`;
 
+      // Strict content fingerprint to collapse exact duplicate rows in Google Sheet
+      const normCust = customerName.toLowerCase().replace(/\s+/g, ' ').trim();
+      const normOrdNo = orderNo.toLowerCase().replace(/\s+/g, ' ').trim();
+      const normTimeOrDate = (timestamp || orderDate).toLowerCase().replace(/\s+/g, ' ').trim();
+      const normItemsSig = Array.from({ length: lineCount }, (_, li) => {
+        const it = (items[li] ?? items[0] ?? '').replace(/^\d+\)\s*/, '').toLowerCase().replace(/\s+/g, ' ').trim();
+        const col = (colors[li] ?? colors[0] ?? '').toLowerCase().trim();
+        const qVal = parseNum(qtys[li] ?? qtys[0]);
+        return `${it}|${col}|${qVal}`;
+      }).join(';;');
+
+      const dedupKey = (normCust && normOrdNo && normTimeOrDate)
+        ? `${normTimeOrDate}___${normCust}___${normOrdNo}___${normItemsSig}`
+        : `ROW_${sheetRowIndex}`;
+
+      const rowLineItems: ProductOrderRow[] = [];
       for (let lineIdx = 0; lineIdx < lineCount; lineIdx++) {
         const unit = units[lineIdx] ?? units[0] ?? '';
         const itemName = items[lineIdx] ?? items[0] ?? '';
@@ -429,7 +448,7 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
         const rawBalStr = balances[lineIdx] !== undefined ? balances[lineIdx] : (lineCount === 1 ? balances[0] : '');
         const balanceQty = rawBalStr !== '' ? parseNum(rawBalStr) : Number((qty - dispatchQty).toFixed(4));
 
-        results.push({
+        rowLineItems.push({
           orderId: `ORD-AUTO-${sheetRowIndex}-${lineIdx + 1}`,
           referenceNo: `ROW-${sheetRowIndex}`,
           sheetRowIndex,
@@ -478,6 +497,12 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
           balanceQty
         });
       }
+
+      if (!seenAutoFingerprints.has(dedupKey)) {
+        autoBlockOrder.push(dedupKey);
+      }
+      // Keep the latest Google Sheet row if exact duplicate exists
+      seenAutoFingerprints.set(dedupKey, rowLineItems);
     } else if (isRawOrdersForm) {
       // Raw Google Form "Orders!A:R" layout
       const timestamp = (r[0] || '').trim();
@@ -581,6 +606,11 @@ export function transformOrdersCsvToProductOrderRows(csvText: string): ProductOr
     }
   }
 
+  for (const key of autoBlockOrder) {
+    const items = seenAutoFingerprints.get(key);
+    if (items) results.push(...items);
+  }
+
   return results;
 }
 
@@ -590,12 +620,13 @@ async function fetchSheetCsvByGidOrName(
   gid?: string,
   tabName?: string
 ): Promise<string | null> {
+  const cb = Date.now();
   const urls: string[] = [];
   if (gid !== undefined && gid !== '') {
-    urls.push(`https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`);
+    urls.push(`https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}&_cb=${cb}`);
   }
   if (tabName) {
-    urls.push(`https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`);
+    urls.push(`https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}&_cb=${cb}`);
   }
 
   for (const url of urls) {
